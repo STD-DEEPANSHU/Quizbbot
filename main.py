@@ -9,6 +9,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    PollAnswerHandler,
     filters,
     ContextTypes,
 )
@@ -18,7 +19,7 @@ from config import TELEGRAM_TOKEN, MONGO_URI, DB_NAME
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 quizzes = db["quizzes"]
-users_answers = db["users_answers"]  # Track per-user answers for each quiz
+users_answers = db["users_answers"]  # Store answers per quiz per user
 
 # -------------------- USER STATE --------------------
 user_state = {}
@@ -176,7 +177,7 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
             [InlineKeyboardButton("🔂 Only Questions", callback_data="shuffle_questions")]
         ]
         await query.message.reply_text(
-            "Choose how you want to shuffle your quiz:",
+            "Choose how you want to shuffle this quiz:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -221,7 +222,7 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# -------------------- PLAY QUIZ WITH AUTO-CLOSE POLLS & ACCURATE LEADERBOARD --------------------
+# -------------------- PLAY QUIZ --------------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -244,7 +245,11 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if shuffle_option in ["shuffle_all", "shuffle_questions"]:
         random.shuffle(questions)
 
-    user_answers = []
+    # Store active quiz info for PollAnswerHandler
+    user_state[user_id]["current_questions"] = questions
+    user_state[user_id]["timer"] = timer
+    user_state[user_id]["quiz_answers"] = {}  # user_id -> question index -> selected option
+    user_state[user_id]["current_poll_ids"] = []
 
     for idx, q in enumerate(questions, start=1):
         options = q["options"][:]
@@ -266,34 +271,38 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
+        # Save poll IDs for tracking
+        user_state[user_id]["current_poll_ids"].append(poll_message.message_id)
+
         # Wait for timer
         await asyncio.sleep(timer)
 
         # Auto-close poll
         await context.bot.stop_poll(chat_id=query.message.chat_id, message_id=poll_message.message_id)
 
-        # Track user answer (assume correct if selected correctly)
-        user_answers.append({
-            "question_index": idx,
-            "correct_option": correct_index
-        })
-
-    # Save user answers for this quiz
-    users_answers.insert_one({
-        "user_id": user_id,
-        "quiz_id": str(quiz['_id']),
-        "answers": user_answers
-    })
-
-    # -------------------- CURRENT QUIZ LEADERBOARD --------------------
-    all_users = list(users_answers.find({"quiz_id": str(quiz['_id'])}))
+    # -------------------- CALCULATE LEADERBOARD --------------------
+    quiz_answers = user_state[user_id].get("quiz_answers", {})
     leaderboard = []
 
-    for doc in all_users:
-        u_id = doc["user_id"]
-        answers = doc["answers"]
-        total_correct = sum(1 for a in answers if a["correct_option"] is not None)
-        total_questions = len(answers)
+    # Collect all users who played this quiz
+    all_docs = list(users_answers.find({"quiz_id": str(quiz['_id'])}))
+    user_ids_played = set([doc["user_id"] for doc in all_docs] + [user_id])
+
+    for u_id in user_ids_played:
+        if u_id == user_id:
+            answers = quiz_answers
+        else:
+            doc = users_answers.find_one({"quiz_id": str(quiz['_id']), "user_id": u_id})
+            if not doc:
+                continue
+            answers = {a["question_index"]: a["selected_option"] for a in doc["answers"]}
+
+        total_correct = 0
+        total_questions = len(questions)
+        for idx_q, q in enumerate(questions, start=1):
+            correct_index = q["correct_index"]
+            if answers.get(idx_q) == correct_index:
+                total_correct += 1
         leaderboard.append((u_id, total_correct, total_questions))
 
     leaderboard.sort(key=lambda x: x[1], reverse=True)
@@ -305,8 +314,31 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.message.reply_text(f"✅ Quiz Finished!\n\n{leaderboard_text}")
 
+    # Save user answers to DB
+    answers_to_save = [{"question_index": k, "selected_option": v} for k, v in quiz_answers.items()]
+    users_answers.insert_one({
+        "user_id": user_id,
+        "quiz_id": str(quiz['_id']),
+        "answers": answers_to_save
+    })
+
     if user_id in user_state:
         del user_state[user_id]
+
+# -------------------- POLL ANSWER HANDLER --------------------
+async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.poll_answer.user.id
+    poll_id = update.poll_answer.poll_id
+    selected_option = update.poll_answer.option_ids[0] if update.poll_answer.option_ids else None
+
+    # Map poll_id to question index
+    for uid, state in user_state.items():
+        if "current_poll_ids" in state and poll_id in state["current_poll_ids"]:
+            idx_q = state["current_poll_ids"].index(poll_id) + 1
+            if "quiz_answers" not in state:
+                state["quiz_answers"] = {}
+            state["quiz_answers"][idx_q] = selected_option
+            break
 
 # -------------------- MAIN --------------------
 def main():
@@ -321,6 +353,7 @@ def main():
     app.add_handler(CallbackQueryHandler(more_questions_handler, pattern="^(new_question|finish_quiz)$"))
     app.add_handler(CallbackQueryHandler(shuffle_handler, pattern="^(shuffle_all|no_shuffle|shuffle_answers|shuffle_questions|play_shuffle_.*)$"))
     app.add_handler(CallbackQueryHandler(play_timer_handler, pattern="^play_timer_.*$"))
+    app.add_handler(PollAnswerHandler(poll_answer_handler))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
