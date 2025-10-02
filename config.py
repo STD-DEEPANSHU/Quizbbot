@@ -1,14 +1,18 @@
 import os
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Local development ke liye .env load karega (Heroku me ignore ho jayega)
 load_dotenv()
 
-class Config:
-    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-    MONGO_URI = os.getenv("MONGO_URI")
-    DB_NAME = os.getenv("DB_NAME", "quiz_bot")
+# Environment variables
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+MONGO_URI = os.environ.get("MONGO_URI")
+DB_NAME = os.environ.get("DB_NAME", "quiz_bot")
 
-# Example Usage:
-# from config import Config
-# print(Config.TELEGRAM_TOKEN)
+# Debugging ke liye (sirf logs me check karne ke liye)
+if not TELEGRAM_TOKEN:
+    print("❌ ERROR: TELEGRAM_TOKEN not set")
+if not MONGO_URI:
+    print("❌ ERROR: MONGO_URI not set")
+else:
+    print("✅ Config loaded successfully")
