@@ -226,12 +226,8 @@ async def finish_quiz_handler(query: CallbackQuery, state: FSMContext):
     await query.answer()
 
 # -------------------- QUIZ PLAY FLOW --------------------
-
-# YEH FUNCTION UPDATE KIYA GAYA HAI
 @router.callback_query(F.data.regexp(r"^play_(?!shuffle_|timer_).+$"))
 async def play_quiz_start(query: CallbackQuery, state: FSMContext):
-    # Ab 'if' condition ki zaroorat nahi hai, kyunki filter hi sahi data laayega.
-    
     quiz_id = query.data.replace("play_", "")
     await state.update_data(quiz_id=quiz_id)
 
@@ -284,10 +280,12 @@ async def play_timer_handler(query: CallbackQuery, state: FSMContext):
 
     try:
         quiz = quizzes.find_one({"_id": ObjectId(quiz_id)})
-        if not quiz:
-            await query.message.answer("❌ Quiz not found!")
+        # YAHAN PAR NAYA SAFETY CHECK ADD KIYA GAYA HAI
+        if not quiz or not quiz.get("questions"):
+            await query.message.answer("❌ This quiz was not found or is empty. Cannot start.")
             await query.answer()
             return
+            
     except Exception as e:
         logger.error(f"Error finding quiz {quiz_id}: {e}")
         await query.message.answer("❌ Could not start quiz. Please try again later.")
