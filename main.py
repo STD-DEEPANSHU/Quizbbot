@@ -177,7 +177,7 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
             [InlineKeyboardButton("🔂 Only Questions", callback_data="shuffle_questions")]
         ]
         await query.message.reply_text(
-            "Choose how you want to shuffle this quiz:",
+            "Choose how you want to shuffle your quiz:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -208,7 +208,11 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Quiz not found!")
             return
 
-        user_state[user_id] = {"play_quiz": quiz_id, "shuffle": shuffle_option, "quiz_title": quiz["title"]}
+        user_state[user_id] = {
+            "play_quiz": quiz_id,
+            "shuffle": shuffle_option,
+            "quiz_title": quiz["title"]
+        }
 
         keyboard = [
             [InlineKeyboardButton("10s", callback_data=f"play_timer_{quiz_id}_10"),
@@ -237,7 +241,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text("❌ Quiz not found!")
         return
 
-    state = user_state.get(user_id, {})
+    state = user_state[user_id]
     shuffle_option = state.get("shuffle", "no_shuffle")
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
@@ -245,10 +249,9 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if shuffle_option in ["shuffle_all", "shuffle_questions"]:
         random.shuffle(questions)
 
-    # Store active quiz info for PollAnswerHandler
     user_state[user_id]["current_questions"] = questions
     user_state[user_id]["timer"] = timer
-    user_state[user_id]["quiz_answers"] = {}  # user_id -> question index -> selected option
+    user_state[user_id]["quiz_answers"] = {}
     user_state[user_id]["current_poll_ids"] = []
 
     for idx, q in enumerate(questions, start=1):
@@ -271,59 +274,30 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
-        # Save poll IDs for tracking
-        user_state[user_id]["current_poll_ids"].append(poll_message.message_id)
+        # Save correct poll_id for PollAnswerHandler
+        poll_id = poll_message.poll.id
+        user_state[user_id]["current_poll_ids"].append(poll_id)
 
-        # Wait for timer
         await asyncio.sleep(timer)
-
-        # Auto-close poll
         await context.bot.stop_poll(chat_id=query.message.chat_id, message_id=poll_message.message_id)
 
-    # -------------------- CALCULATE LEADERBOARD --------------------
+    # Leaderboard calculation
     quiz_answers = user_state[user_id].get("quiz_answers", {})
-    leaderboard = []
+    total_questions = len(questions)
+    correct_count = sum(1 for idx_q, q in enumerate(questions, start=1) if quiz_answers.get(idx_q) == q["correct_index"])
 
-    # Collect all users who played this quiz
-    all_docs = list(users_answers.find({"quiz_id": str(quiz['_id'])}))
-    user_ids_played = set([doc["user_id"] for doc in all_docs] + [user_id])
+    leaderboard_text = f"🏆 Quiz Finished!\n\nYour Score: {correct_count}/{total_questions}\n"
+    await query.message.reply_text(leaderboard_text)
 
-    for u_id in user_ids_played:
-        if u_id == user_id:
-            answers = quiz_answers
-        else:
-            doc = users_answers.find_one({"quiz_id": str(quiz['_id']), "user_id": u_id})
-            if not doc:
-                continue
-            answers = {a["question_index"]: a["selected_option"] for a in doc["answers"]}
-
-        total_correct = 0
-        total_questions = len(questions)
-        for idx_q, q in enumerate(questions, start=1):
-            correct_index = q["correct_index"]
-            if answers.get(idx_q) == correct_index:
-                total_correct += 1
-        leaderboard.append((u_id, total_correct, total_questions))
-
-    leaderboard.sort(key=lambda x: x[1], reverse=True)
-    top10 = leaderboard[:10]
-
-    leaderboard_text = "🏆 Quiz Leaderboard\n\n"
-    for idx, (u_id, correct, total) in enumerate(top10, start=1):
-        leaderboard_text += f"{idx}. User {u_id}: {correct}/{total}\n"
-
-    await query.message.reply_text(f"✅ Quiz Finished!\n\n{leaderboard_text}")
-
-    # Save user answers to DB
+    # Save answers in DB
     answers_to_save = [{"question_index": k, "selected_option": v} for k, v in quiz_answers.items()]
     users_answers.insert_one({
         "user_id": user_id,
-        "quiz_id": str(quiz['_id']),
+        "quiz_id": str(quiz["_id"]),
         "answers": answers_to_save
     })
 
-    if user_id in user_state:
-        del user_state[user_id]
+    del user_state[user_id]
 
 # -------------------- POLL ANSWER HANDLER --------------------
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -331,7 +305,6 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     poll_id = update.poll_answer.poll_id
     selected_option = update.poll_answer.option_ids[0] if update.poll_answer.option_ids else None
 
-    # Map poll_id to question index
     for uid, state in user_state.items():
         if "current_poll_ids" in state and poll_id in state["current_poll_ids"]:
             idx_q = state["current_poll_ids"].index(poll_id) + 1
