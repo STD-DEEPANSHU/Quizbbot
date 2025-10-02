@@ -171,60 +171,48 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
         state["step"] = "question"
         await query.message.reply_text("Send me the next *question*.")
     elif query.data == "finish_quiz":
-        keyboard = [
-            [InlineKeyboardButton("🔀 Shuffle All", callback_data="shuffle_all")],
-            [InlineKeyboardButton("❌ No Shuffle", callback_data="no_shuffle")],
-            [InlineKeyboardButton("🔁 Only Answers", callback_data="shuffle_answers")],
-            [InlineKeyboardButton("🔂 Only Questions", callback_data="shuffle_questions")],
-        ]
-        await query.message.reply_text(
-            "Choose how you want to shuffle your quiz:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+        try:
+            quizzes.insert_one({
+                "user_id": query.from_user.id,
+                "title": state.get("title", "Untitled Quiz"),
+                "description": state.get("description", ""),
+                "questions": state.get("questions", []),
+            })
+            await query.message.reply_text(f"✅ Your quiz has been saved successfully!")
+            state.clear()
+        except Exception as e:
+            logger.error(f"Error saving new quiz to DB: {e}")
+            await query.message.reply_text("❌ Could not save your quiz. Please try again later.")
 
 # -------------------- SHUFFLE HANDLER --------------------
 async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
     user_data = context.user_data
 
-    if "step" in user_data:
-        shuffle_option = query.data
-        try:
-            quizzes.insert_one({
-                "user_id": user_id,
-                "title": user_data.get("title", "Untitled Quiz"),
-                "description": user_data.get("description", ""),
-                "questions": user_data.get("questions", []),
-            })
-            await query.message.reply_text(f"✅ Your quiz has been saved successfully!")
-            user_data.clear()
-        except Exception as e:
-            logger.error(f"Error saving new quiz to DB: {e}")
-            await query.message.reply_text("❌ Could not save your quiz. Please try again later.")
-    else:
-        parts = query.data.split("_")
-        quiz_id = parts[2]
-        shuffle_option = "_".join(parts[3:])
-        user_data["play_shuffle_option"] = shuffle_option
-        keyboard = [
-            [InlineKeyboardButton("10s", callback_data=f"play_timer_{quiz_id}_10"),
-             InlineKeyboardButton("15s", callback_data=f"play_timer_{quiz_id}_15"),
-             InlineKeyboardButton("30s", callback_data=f"play_timer_{quiz_id}_30")],
-            [InlineKeyboardButton("45s", callback_data=f"play_timer_{quiz_id}_45"),
-             InlineKeyboardButton("1min", callback_data=f"play_timer_{quiz_id}_60")],
-        ]
-        await query.message.reply_text(
-            "⏱ Select time per question for this quiz:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+    parts = query.data.split("_")
+    quiz_id = parts[2]
+    shuffle_option = "_".join(parts[3:])
+    user_data["play_shuffle_option"] = shuffle_option
+    keyboard = [
+        [InlineKeyboardButton("10s", callback_data=f"play_timer_{quiz_id}_10"),
+         InlineKeyboardButton("15s", callback_data=f"play_timer_{quiz_id}_15"),
+         InlineKeyboardButton("30s", callback_data=f"play_timer_{quiz_id}_30")],
+        [InlineKeyboardButton("45s", callback_data=f"play_timer_{quiz_id}_45"),
+         InlineKeyboardButton("1min", callback_data=f"play_timer_{quiz_id}_60")],
+    ]
+    await query.message.reply_text(
+        "⏱ Select time per question for this quiz:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
-# -------------------- PLAY QUIZ --------------------
+# -------------------- PLAY QUIZ (FINAL FIXED VERSION) --------------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_data = context.user_data
+    user_id = query.from_user.id
+    user_data = context.user_data 
+    
     parts = query.data.split("_")
     quiz_id = parts[2]
     timer = int(parts[3])
@@ -240,17 +228,22 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     shuffle_option = user_data.get("play_shuffle_option", "no_shuffle")
-    await query.message.reply_text(f"▶️ Starting quiz: *{quiz['title']}*")
+    await query.message.reply_text(f"▶️ Starting quiz: *{quiz['title']}*", parse_mode='Markdown')
+    
     questions = copy.deepcopy(quiz["questions"])
     if shuffle_option in ["shuffle_all", "shuffle_questions"]:
         random.shuffle(questions)
 
     user_data["quiz_answers"] = {}
     user_data["session_correct_answers"] = {}
+    
+    if 'poll_to_user' not in context.bot_data:
+        context.bot_data['poll_to_user'] = {}
 
     for idx, q in enumerate(questions, start=1):
         options = q["options"][:]
         correct_index = q["correct_index"]
+        
         if shuffle_option in ["shuffle_all", "shuffle_answers"]:
             paired = list(enumerate(options))
             random.shuffle(paired)
@@ -261,6 +254,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             shuffled_correct_index = correct_index
 
         user_data["session_correct_answers"][idx] = shuffled_correct_index
+        
         poll_message = await context.bot.send_poll(
             chat_id=query.message.chat_id,
             question=f"Q{idx}: {q['question']}",
@@ -270,38 +264,40 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             open_period=timer,
             is_anonymous=False,
         )
-        if 'poll_to_user' not in context.bot_data:
-            context.bot_data['poll_to_user'] = {}
+        
         context.bot_data['poll_to_user'][poll_message.poll.id] = {
-            "user_id": query.from_user.id,
+            "user_id": user_id,
             "question_idx": idx,
         }
+        
         await asyncio.sleep(timer)
 
-    await asyncio.sleep(2) # Thoda extra time dena taaki last poll ka result aa jaye
+    await asyncio.sleep(2) 
 
-    quiz_answers = user_data.get("quiz_answers", {})
-    session_correct_answers = user_data.get("session_correct_answers", {})
+    final_user_data = context.application.user_data[user_id]
+    quiz_answers = final_user_data.get("quiz_answers", {})
+    session_correct_answers = final_user_data.get("session_correct_answers", {})
     total_questions = len(questions)
+    
     correct_count = sum(1 for q_idx, sel_ans in quiz_answers.items() if sel_ans == session_correct_answers.get(q_idx))
 
     leaderboard_text = f"🏆 Quiz Finished!\n\nYour Score: *{correct_count} / {total_questions}*"
-    await context.bot.send_message(chat_id=query.from_user.id, text=leaderboard_text, parse_mode='Markdown')
+    await context.bot.send_message(chat_id=user_id, text=leaderboard_text, parse_mode='Markdown')
     
     try:
         answers_to_save = [{"question_index": k, "selected_option": v} for k, v in quiz_answers.items()]
         if answers_to_save:
             users_answers.insert_one({
-                "user_id": query.from_user.id,
+                "user_id": user_id,
                 "quiz_id": str(quiz["_id"]),
                 "answers": answers_to_save,
             })
     except Exception as e:
         logger.error(f"Error saving user answers to DB: {e}")
     
-    user_data.clear()
+    final_user_data.clear()
 
-# -------------------- POLL ANSWER HANDLER (FIXED) --------------------
+# -------------------- POLL ANSWER HANDLER --------------------
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     poll_id = update.poll_answer.poll_id
     selected_option = update.poll_answer.option_ids[0] if update.poll_answer.option_ids else None
@@ -315,17 +311,13 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_id = poll_info["user_id"]
         question_idx = poll_info["question_idx"]
 
-        # BUG FIX: Directly access the user's data dictionary to modify it
-        # .get() ek copy banata hai, lekin humein original ko badalna hai.
         user_data_for_quiz_player = context.application.user_data[user_id]
         
-        # Make sure the dictionary exists before adding to it
         if "quiz_answers" not in user_data_for_quiz_player:
             user_data_for_quiz_player["quiz_answers"] = {}
             
         user_data_for_quiz_player["quiz_answers"][question_idx] = selected_option
         
-        # Poll map se entry hata do jab answer mil jaye
         del context.bot_data['poll_to_user'][poll_id]
 
 # -------------------- MAIN --------------------
@@ -339,7 +331,7 @@ def main():
     app.add_handler(CallbackQueryHandler(options_button, pattern="^(add_option|done_options)$"))
     app.add_handler(CallbackQueryHandler(correct_button, pattern="^correct_.*$"))
     app.add_handler(CallbackQueryHandler(more_questions_handler, pattern="^(new_question|finish_quiz)$"))
-    app.add_handler(CallbackQueryHandler(shuffle_handler, pattern="^(shuffle_all|no_shuffle|shuffle_answers|shuffle_questions|play_shuffle_.*)$"))
+    app.add_handler(CallbackQueryHandler(shuffle_handler, pattern="^play_shuffle_.*$"))
     app.add_handler(CallbackQueryHandler(play_timer_handler, pattern="^play_timer_.*$"))
     app.add_handler(PollAnswerHandler(poll_answer_handler))
 
