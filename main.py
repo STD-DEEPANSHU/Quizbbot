@@ -77,6 +77,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = user_state[user_id]
 
+    # Handle /skip
+    if text == "/skip" and state.get("step") == "description":
+        state["description"] = ""
+        state["questions"] = []
+        state["step"] = "question"
+        await update.message.reply_text("Send your first *question*.")
+        return
+
     if state["step"] == "title":
         state["title"] = text
         state["step"] = "description"
@@ -120,7 +128,7 @@ async def options_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["step"] = "correct"
         opts = state["current_question"]["options"]
         keyboard = [[InlineKeyboardButton(o, callback_data=f"correct_{i}")] for i, o in enumerate(opts)]
-        await query.message.reply_text("Which one is the correct option?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("Which one is the correct option?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ----------------- CORRECT OPTION HANDLER -----------------
 async def correct_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -177,14 +185,14 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# ----------------- SHUFFLE SELECTION HANDLER -----------------
+# ----------------- SHUFFLE SELECTION HANDLER (Updated) -----------------
 async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     state = user_state.get(user_id, {})
 
-    if "step" in state:  # new quiz
+    if "step" in state:  # new quiz creation
         shuffle_option = query.data
         quizzes.insert_one({
             "user_id": user_id,
@@ -196,8 +204,10 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_state[user_id]
         await query.message.reply_text(f"✅ Your quiz has been saved with option: {shuffle_option.replace('_',' ').title()}")
     else:  # existing quiz play
-        quiz_id = query.data.split("_")[2]
-        shuffle_option = query.data.split("_")[3]
+        # parse callback_data: play_shuffle_{quiz_id}_{shuffle_option}
+        parts = query.data.split("_")
+        quiz_id = parts[2]
+        shuffle_option = parts[3]
         user_state[user_id] = {"play_quiz": quiz_id, "shuffle": shuffle_option}
 
         # Ask timer next
@@ -213,7 +223,7 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# ----------------- PLAY QUIZ TIMER HANDLER -----------------
+# ----------------- PLAY QUIZ TIMER HANDLER (Updated Shuffle Logic) -----------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -234,6 +244,8 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
     questions = copy.deepcopy(quiz["questions"])  # deep copy
+
+    # Shuffle questions if needed
     if shuffle_option in ["shuffle_all", "shuffle_questions"]:
         random.shuffle(questions)
 
@@ -241,12 +253,14 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         options = q["options"][:]
         correct_index = q["correct_index"]
 
+        # Shuffle options if needed
         if shuffle_option in ["shuffle_all", "shuffle_answers"]:
-            combined = list(enumerate(options))
-            random.shuffle(combined)
-            indices, options = zip(*combined)
+            paired = list(enumerate(options))
+            random.shuffle(paired)
+            new_indices, options = zip(*paired)
             options = list(options)
-            correct_index = list(indices).index(correct_index)
+            # Recalculate correct index
+            correct_index = list(new_indices).index(correct_index)
 
         await context.bot.send_poll(
             chat_id=query.message.chat_id,
@@ -259,6 +273,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         await asyncio.sleep(timer)
 
+        # Save analytics
         analytics.insert_one({
             "quiz_id": str(quiz['_id']),
             "user_id": user_id,
