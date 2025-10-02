@@ -18,8 +18,7 @@ from config import TELEGRAM_TOKEN, MONGO_URI, DB_NAME
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 quizzes = db["quizzes"]
-analytics = db["analytics"]  # Will store each user's answer
-users_answers = db["users_answers"]  # New collection to track per user
+users_answers = db["users_answers"]  # To track per user answers
 
 # -------------------- USER STATE --------------------
 user_state = {}
@@ -78,7 +77,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             leaderboard_text += f"User {u_id}: {total_correct}/{total_questions}\n"
         await query.message.reply_text(leaderboard_text)
 
-# -------------------- MESSAGE HANDLER (QUIZ CREATION) --------------------
+# -------------------- MESSAGE HANDLER --------------------
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
@@ -200,22 +199,27 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     state = user_state.get(user_id, {})
 
-    if "step" in state:
+    if "step" in state:  # New quiz creation
         shuffle_option = query.data
         quizzes.insert_one({
             "user_id": user_id,
-            "title": state["title"],
+            "title": state.get("title", "Untitled Quiz"),
             "description": state.get("description", ""),
-            "questions": state["questions"],
+            "questions": state.get("questions", []),
             "shuffle": shuffle_option
         })
         del user_state[user_id]
         await query.message.reply_text(f"✅ Your quiz has been saved with option: {shuffle_option.replace('_',' ').title()}")
-    else:
+    else:  # Existing quiz play
         parts = query.data.split("_")
         quiz_id = parts[2]
         shuffle_option = parts[3]
-        user_state[user_id] = {"play_quiz": quiz_id, "shuffle": shuffle_option}
+        quiz = quizzes.find_one({"_id": ObjectId(quiz_id)})
+        if not quiz:
+            await query.message.reply_text("❌ Quiz not found!")
+            return
+
+        user_state[user_id] = {"play_quiz": quiz_id, "shuffle": shuffle_option, "quiz_title": quiz["title"]}
 
         keyboard = [
             [InlineKeyboardButton("10s", callback_data=f"play_timer_{quiz_id}_10"),
@@ -229,7 +233,7 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# -------------------- PLAY QUIZ WITH TIMER & SAVE ANSWERS --------------------
+# -------------------- PLAY QUIZ --------------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -266,7 +270,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             options = list(options)
             correct_index = list(new_indices).index(correct_index)
 
-        poll_message = await context.bot.send_poll(
+        await context.bot.send_poll(
             chat_id=query.message.chat_id,
             question=f"Q{idx}: {q['question']} (⏱️ {timer}s)",
             options=options,
@@ -275,12 +279,10 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
-        # Save answer for analytics
-        user_quiz_answers.append({"question_index": idx, "correct_option": correct_index, "options": options})
-
+        user_quiz_answers.append({"question_index": idx, "correct_option": correct_index})
         await asyncio.sleep(timer)
 
-    # Save user's quiz answers in DB
+    # Save user answers
     users_answers.insert_one({
         "user_id": user_id,
         "quiz_id": str(quiz['_id']),
