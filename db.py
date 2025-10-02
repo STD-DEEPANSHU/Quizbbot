@@ -1,16 +1,9 @@
-import os
 from pymongo import MongoClient
-from dotenv import load_dotenv
+from config import Config
 
-load_dotenv()
+client = MongoClient(Config.MONGO_URI)
+db = client[Config.DB_NAME]
 
-MONGO_URI = os.getenv("MONGO_URI")
-DB_NAME = os.getenv("DB_NAME", "quiz_bot")
-
-client = MongoClient(MONGO_URI)
-db = client[DB_NAME]
-
-# quizzes collection
 quizzes = db["quizzes"]
 
 def save_quiz(user_id, title, description, questions, timer, shuffle):
