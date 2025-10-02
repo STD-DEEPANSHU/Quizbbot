@@ -55,7 +55,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = [[InlineKeyboardButton(f"▶️ {q['title']}", callback_data=f"play_{q['_id']}")] for q in user_quizzes]
         await query.message.reply_text("📚 Your quizzes:", reply_markup=InlineKeyboardMarkup(buttons))
 
-    # Initial quiz click (exclude timer buttons)
+    # Quiz click (before selecting timer)
     elif query.data.startswith("play_") and not query.data.startswith("play_timer_"):
         quiz_id = query.data.replace("play_", "")
         keyboard = [
@@ -208,7 +208,7 @@ async def timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_state[user_id]
         await query.message.reply_text(f"✅ Your quiz has been saved with a {timer_value} sec delay per question!")
 
-# ----------------- PLAY QUIZ TIMER HANDLER -----------------
+# ----------------- PLAY QUIZ TIMER HANDLER (Live Countdown) -----------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -246,7 +246,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     options=q["options"]
                 )
             except:
-                pass
+                pass  # Telegram may prevent editing sometimes
 
 # ----------------- MAIN -----------------
 def main():
