@@ -17,6 +17,7 @@ from telegram.ext import (
     ContextTypes,
     PicklePersistence,
 )
+# Make sure you have a config.py file with your tokens
 from config import TELEGRAM_TOKEN, MONGO_URI, DB_NAME
 
 # Logging setup
@@ -42,6 +43,7 @@ except Exception as e:
 # --- HANDLER FUNCTIONS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a welcome message and main menu."""
     context.user_data.clear()
     keyboard = [
         [InlineKeyboardButton("🆕 Create New Quiz", callback_data="create_quiz")],
@@ -53,6 +55,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles main menu button presses."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -80,6 +83,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Choose how you want to shuffle this quiz:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles messages during the quiz creation process."""
     user_data = context.user_data
     text = update.message.text
     if "step" not in user_data: return
@@ -106,6 +110,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Option {len(state['current_question']['options'])} saved. What next?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def options_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the 'Add More Option' and 'Done' buttons."""
     query = update.callback_query
     await query.answer()
     state = context.user_data
@@ -118,6 +123,7 @@ async def options_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Which one is the correct option?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def correct_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the selection of the correct answer."""
     query = update.callback_query
     await query.answer()
     state = context.user_data
@@ -131,6 +137,7 @@ async def correct_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Question added! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles adding more questions or finishing the quiz creation."""
     query = update.callback_query
     await query.answer()
     state = context.user_data
@@ -147,6 +154,7 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
         state.clear()
 
 async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the shuffle option selection."""
     query = update.callback_query
     await query.answer()
     user_data = context.user_data
@@ -160,6 +168,7 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text("⏱ Select time per question:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the entire quiz playing flow."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -205,16 +214,15 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.bot_data['poll_to_user'][poll_message.poll.id] = {"user_id": user_id, "question_idx": idx}
         await asyncio.sleep(timer)
 
-    await asyncio.sleep(2)
+    # Final wait to ensure all poll answers from Telegram are received
+    await query.message.reply_text("<i>Calculating results...</i>", parse_mode='HTML')
+    await asyncio.sleep(5)
 
     async with user_lock:
         final_user_data = context.application.user_data.get(user_id, {})
         total_questions, correct_count, wrong_count = len(questions), final_user_data.get("correct_count", 0), final_user_data.get("wrong_count", 0)
         missed_count = total_questions - (correct_count + wrong_count)
         duration = int(time.time() - start_time)
-        
-        # --- DEBUGGING MESSAGE ---
-        await context.bot.send_message(chat_id=user_id, text=f"--- DEBUG: FINAL CALCULATION ---\nCorrect: {correct_count}\nWrong: {wrong_count}\nTotal Questions: {total_questions}")
 
         leaderboard_text = (
             f"🏁 The quiz '{quiz['title']}' has finished!\n\n"
@@ -223,23 +231,27 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"⏱️ {duration} sec\n\n🥇1st place out of 1."
         )
         await context.bot.send_message(chat_id=user_id, text=leaderboard_text)
+        
+        # Save answers to DB if any were given
+        if (correct_count + wrong_count) > 0:
+             # This part can be expanded to save detailed answers if needed
+             pass
+
         final_user_data.clear()
         
     if user_id in user_locks: del user_locks[user_id]
 
-# --- POLL ANSWER HANDLER WITH DEBUGGING ---
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles a user's vote in a poll and updates the score in real-time."""
     poll_id = update.poll_answer.poll_id
     poll_map = context.bot_data.get('poll_to_user', {})
-
-    # --- DEBUGGING MESSAGE ---
-    await context.bot.send_message(chat_id=update.poll_answer.user.id, text=f"--- DEBUG: PollAnswerHandler Triggered ---\nPoll ID: {poll_id}")
 
     if poll_id in poll_map:
         poll_info = poll_map.pop(poll_id, None)
         if not poll_info: return
 
-        user_id, question_idx = poll_info["user_id"], poll_info["question_idx"]
+        user_id = poll_info["user_id"]
+        question_idx = poll_info["question_idx"]
         user_lock = user_locks[user_id]
 
         async with user_lock:
@@ -248,25 +260,20 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             if update.poll_answer.option_ids:
                 selected_option = update.poll_answer.option_ids[0]
+                
                 correct_answers = user_data.get("session_correct_answers", {})
-                correct_option = correct_answers.get(question_idx)
-
-                # --- DEBUGGING MESSAGE ---
-                await context.bot.send_message(chat_id=user_id, text=f"--- DEBUG: Q{question_idx} Answer Processing ---\nAapne Chuna: {selected_option} (type: {type(selected_option)})\nSahi Jawab Tha: {correct_option} (type: {type(correct_option)})")
-
-                if selected_option == correct_option:
+                if selected_option == correct_answers.get(question_idx):
                     user_data['correct_count'] = user_data.get('correct_count', 0) + 1
-                    await context.bot.send_message(chat_id=user_id, text="--- DEBUG: CORRECT! Score updated. ---")
                 else:
                     user_data['wrong_count'] = user_data.get('wrong_count', 0) + 1
-                    await context.bot.send_message(chat_id=user_id, text="--- DEBUG: WRONG! Score updated. ---")
 
 # --- MAIN FUNCTION ---
 def main():
+    """Starts the bot."""
     persistence = PicklePersistence(filepath="bot_state_data")
     app = Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).build()
 
-    # Add handlers
+    # Register handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(CallbackQueryHandler(button_handler, pattern="^(create_quiz|view_quizzes|play_(?!timer_|shuffle_).*)$"))
