@@ -172,7 +172,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    
+
     start_time = time.time()
     user_data = context.user_data
     parts = query.data.split("_")
@@ -185,15 +185,17 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     shuffle_option = user_data.get("play_shuffle_option", "no_shuffle")
     await query.message.reply_text(f"▶️ Starting quiz: *{quiz['title']}*", parse_mode='Markdown')
-    
+
     questions = copy.deepcopy(quiz["questions"])
     if shuffle_option in ["shuffle_all", "shuffle_questions"]: random.shuffle(questions)
 
     user_lock = user_locks[user_id]
+    session_poll_ids = [] # <-- CHANGE HERE: Memory leak fix ke liye poll IDs store karenge
+
     async with user_lock:
         user_data['correct_count'], user_data['wrong_count'] = 0, 0
         user_data["session_correct_answers"] = {}
-    
+
     if 'poll_to_user' not in context.bot_data: context.bot_data['poll_to_user'] = {}
 
     for idx, q in enumerate(questions, start=1):
@@ -211,12 +213,14 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             chat_id=query.message.chat_id, question=f"Q{idx}: {q['question']}", options=options,
             type=Poll.QUIZ, correct_option_id=correct_index, open_period=timer, is_anonymous=False
         )
+        session_poll_ids.append(poll_message.poll.id) # <-- CHANGE HERE: Memory leak fix
         context.bot_data['poll_to_user'][poll_message.poll.id] = {"user_id": user_id, "question_idx": idx}
         await asyncio.sleep(timer)
 
     # Final wait to ensure all poll answers from Telegram are received
     await query.message.reply_text("<i>Calculating results...</i>", parse_mode='HTML')
-    await asyncio.sleep(5)
+    # <-- CHANGE HERE: Wait time badhaya gaya hai taaki score update ho sake
+    await asyncio.sleep(15) 
 
     async with user_lock:
         final_user_data = context.application.user_data.get(user_id, {})
@@ -231,14 +235,19 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"⏱️ {duration} sec\n\n🥇1st place out of 1."
         )
         await context.bot.send_message(chat_id=user_id, text=leaderboard_text)
-        
+
         # Save answers to DB if any were given
         if (correct_count + wrong_count) > 0:
              # This part can be expanded to save detailed answers if needed
              pass
 
         final_user_data.clear()
-        
+
+    # <-- CHANGE HERE: Memory leak fix, bot data se purane poll IDs saaf kar rahe hain
+    if 'poll_to_user' in context.bot_data:
+        for poll_id in session_poll_ids:
+            context.bot_data['poll_to_user'].pop(poll_id, None)
+
     if user_id in user_locks: del user_locks[user_id]
 
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -247,7 +256,8 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     poll_map = context.bot_data.get('poll_to_user', {})
 
     if poll_id in poll_map:
-        poll_info = poll_map.pop(poll_id, None)
+        # We don't pop here anymore to allow for cleanup later, just get the info
+        poll_info = poll_map.get(poll_id)
         if not poll_info: return
 
         user_id = poll_info["user_id"]
@@ -266,6 +276,9 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                     user_data['correct_count'] = user_data.get('correct_count', 0) + 1
                 else:
                     user_data['wrong_count'] = user_data.get('wrong_count', 0) + 1
+        
+        # Once answered, we can pop it
+        poll_map.pop(poll_id, None)
 
 # --- MAIN FUNCTION ---
 def main():
