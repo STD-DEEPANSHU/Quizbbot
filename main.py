@@ -16,6 +16,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, CallbackQuery, Poll, PollAnswer
 from dotenv import load_dotenv
+# Naya import yahan add kiya gaya hai
+from aiogram.client.default import DefaultBotProperties
 
 # --- SETUP ---
 load_dotenv()
@@ -29,7 +31,8 @@ logger = logging.getLogger(__name__)
 
 # --- Aiogram Setup ---
 storage = MemoryStorage()
-bot = Bot(token=TELEGRAM_TOKEN, parse_mode="Markdown")
+# Bot ko initialize karne ki line update kar di gayi hai
+bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
 dp = Dispatcher(storage=storage)
 router = Router()
 
