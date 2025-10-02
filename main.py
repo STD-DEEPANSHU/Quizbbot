@@ -41,7 +41,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
 
     if query.data == "create_quiz":
@@ -53,15 +52,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user_quizzes:
             await query.message.reply_text("❌ You have no saved quizzes.")
             return
-        buttons = []
-        for q in user_quizzes:
-            buttons.append([InlineKeyboardButton(f"▶️ {q['title']}", callback_data=f"play_{q['_id']}")])
+        buttons = [[InlineKeyboardButton(f"▶️ {q['title']}", callback_data=f"play_{q['_id']}")] for q in user_quizzes]
         await query.message.reply_text("📚 Your quizzes:", reply_markup=InlineKeyboardMarkup(buttons))
 
-    # Only trigger timer selection for initial quiz click, exclude timer buttons
+    # Initial quiz click (exclude timer buttons)
     elif query.data.startswith("play_") and not query.data.startswith("play_timer_"):
         quiz_id = query.data.replace("play_", "")
-        # Ask timer before playing
         keyboard = [
             [InlineKeyboardButton("10s", callback_data=f"play_timer_{quiz_id}_10"),
              InlineKeyboardButton("15s", callback_data=f"play_timer_{quiz_id}_15"),
@@ -217,7 +213,6 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
 
-    # data format: play_timer_<quiz_id>_<timer>
     parts = query.data.split("_")
     if len(parts) < 4:
         await query.message.reply_text("❌ Invalid selection.")
@@ -261,7 +256,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("skip", lambda u, c: message_handler(u, c)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(create_quiz|view_quizzes|play_.*|lang_menu)$"))
+    # Correct order and patterns
+    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(create_quiz|view_quizzes|play_(?!timer_).*)$"))
     app.add_handler(CallbackQueryHandler(options_button, pattern="^(add_option|done_options)$"))
     app.add_handler(CallbackQueryHandler(correct_button, pattern="^correct_.*$"))
     app.add_handler(CallbackQueryHandler(more_questions_handler, pattern="^(new_question|finish_quiz)$"))
