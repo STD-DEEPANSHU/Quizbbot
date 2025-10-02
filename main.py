@@ -221,7 +221,7 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# -------------------- PLAY QUIZ --------------------
+# -------------------- PLAY QUIZ WITH AUTO-CLOSE POLLS --------------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -238,7 +238,6 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     state = user_state.get(user_id, {})
     shuffle_option = state.get("shuffle", "no_shuffle")
-
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
     questions = copy.deepcopy(quiz["questions"])
@@ -258,7 +257,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             options = list(options)
             correct_index = list(new_indices).index(correct_index)
 
-        await context.bot.send_poll(
+        poll_message = await context.bot.send_poll(
             chat_id=query.message.chat_id,
             question=f"Q{idx}: {q['question']} (⏱️ {timer}s)",
             options=options,
@@ -267,9 +266,11 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
-        # Track correct answers
-        user_quiz_answers.append({"question_index": idx, "is_correct": True if correct_index is not None else False})
         await asyncio.sleep(timer)
+        # Close poll automatically
+        await context.bot.stop_poll(chat_id=query.message.chat_id, message_id=poll_message.message_id)
+
+        user_quiz_answers.append({"question_index": idx, "is_correct": True if correct_index is not None else False})
 
     # Save user answers in DB
     users_answers.insert_one({
@@ -278,7 +279,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "answers": user_quiz_answers
     })
 
-    # -------------------- LEADERBOARD CALCULATION --------------------
+    # -------------------- LEADERBOARD --------------------
     all_users = users_answers.distinct("user_id")
     leaderboard = []
     for u_id in all_users:
