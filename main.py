@@ -25,8 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- NEW: LOCKS FOR ASYNC SAFETY ---
-# Har user ke data ko access karne ke liye ek lock
+# --- LOCKS FOR ASYNC SAFETY ---
 user_locks = defaultdict(asyncio.Lock)
 
 # -------------------- MONGO SETUP --------------------
@@ -215,74 +214,76 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-# -------------------- PLAY QUIZ HANDLER (FINAL, NEW LOGIC) --------------------
+# -------------------- PLAY QUIZ HANDLER (DEADLOCK FIXED) --------------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    user_lock = user_locks[user_id]
+    
+    start_time = time.time()
+    user_data = context.user_data
+    parts = query.data.split("_")
+    quiz_id = parts[2]
+    timer = int(parts[3])
 
-    async with user_lock:
-        start_time = time.time()
-        user_data = context.user_data
-        parts = query.data.split("_")
-        quiz_id = parts[2]
-        timer = int(parts[3])
-
-        try:
-            quiz = quizzes.find_one({"_id": ObjectId(quiz_id)})
-            if not quiz:
-                await query.message.reply_text("❌ Quiz not found!")
-                return
-        except Exception as e:
-            logger.error(f"Error finding quiz {quiz_id}: {e}")
-            await query.message.reply_text("❌ Could not start quiz. Please try again later.")
+    try:
+        quiz = quizzes.find_one({"_id": ObjectId(quiz_id)})
+        if not quiz:
+            await query.message.reply_text("❌ Quiz not found!")
             return
+    except Exception as e:
+        logger.error(f"Error finding quiz {quiz_id}: {e}")
+        await query.message.reply_text("❌ Could not start quiz. Please try again later.")
+        return
 
-        shuffle_option = user_data.get("play_shuffle_option", "no_shuffle")
-        await query.message.reply_text(f"▶️ Starting quiz: *{quiz['title']}*", parse_mode='Markdown')
-        
-        questions = copy.deepcopy(quiz["questions"])
-        if shuffle_option in ["shuffle_all", "shuffle_questions"]:
-            random.shuffle(questions)
+    shuffle_option = user_data.get("play_shuffle_option", "no_shuffle")
+    await query.message.reply_text(f"▶️ Starting quiz: *{quiz['title']}*", parse_mode='Markdown')
+    
+    questions = copy.deepcopy(quiz["questions"])
+    if shuffle_option in ["shuffle_all", "shuffle_questions"]:
+        random.shuffle(questions)
 
+    user_lock = user_locks[user_id]
+    async with user_lock:
         user_data['correct_count'] = 0
         user_data['wrong_count'] = 0
         user_data["session_correct_answers"] = {}
+    
+    if 'poll_to_user' not in context.bot_data:
+        context.bot_data['poll_to_user'] = {}
+
+    for idx, q in enumerate(questions, start=1):
+        options = q["options"][:]
+        correct_index = q["correct_index"]
         
-        if 'poll_to_user' not in context.bot_data:
-            context.bot_data['poll_to_user'] = {}
+        if shuffle_option in ["shuffle_all", "shuffle_answers"]:
+            paired = list(enumerate(options))
+            random.shuffle(paired)
+            new_indices, new_options = zip(*paired)
+            options = list(new_options)
+            shuffled_correct_index = list(new_indices).index(correct_index)
+        else:
+            shuffled_correct_index = correct_index
 
-        for idx, q in enumerate(questions, start=1):
-            options = q["options"][:]
-            correct_index = q["correct_index"]
-            
-            if shuffle_option in ["shuffle_all", "shuffle_answers"]:
-                paired = list(enumerate(options))
-                random.shuffle(paired)
-                new_indices, new_options = zip(*paired)
-                options = list(new_options)
-                shuffled_correct_index = list(new_indices).index(correct_index)
-            else:
-                shuffled_correct_index = correct_index
-
+        async with user_lock:
             user_data["session_correct_answers"][idx] = shuffled_correct_index
-            
-            poll_message = await context.bot.send_poll(
-                chat_id=query.message.chat_id,
-                question=f"Q{idx}: {q['question']}",
-                options=options,
-                type=Poll.QUIZ,
-                correct_option_id=int(shuffled_correct_index),
-                open_period=timer,
-                is_anonymous=False,
-            )
-            
-            context.bot_data['poll_to_user'][poll_message.poll.id] = {"user_id": user_id, "question_idx": idx}
-            await asyncio.sleep(timer)
+        
+        poll_message = await context.bot.send_poll(
+            chat_id=query.message.chat_id,
+            question=f"Q{idx}: {q['question']}",
+            options=options,
+            type=Poll.QUIZ,
+            correct_option_id=int(shuffled_correct_index),
+            open_period=timer,
+            is_anonymous=False,
+        )
+        
+        context.bot_data['poll_to_user'][poll_message.poll.id] = {"user_id": user_id, "question_idx": idx}
+        await asyncio.sleep(timer)
 
-        await asyncio.sleep(2)
+    await asyncio.sleep(2)
 
+    async with user_lock:
         final_user_data = context.application.user_data.get(user_id, {})
         total_questions = len(questions)
         correct_count = final_user_data.get("correct_count", 0)
@@ -309,7 +310,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if user_id in user_locks:
         del user_locks[user_id]
 
-# -------------------- POLL ANSWER HANDLER (NEW LOGIC) --------------------
+# -------------------- POLL ANSWER HANDLER --------------------
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     poll_id = update.poll_answer.poll_id
     
