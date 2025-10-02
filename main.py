@@ -225,7 +225,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
     for idx, q in enumerate(quiz["questions"], start=1):
-        # Send poll with timer in question
+        # Initial poll with full timer
         poll_message = await context.bot.send_poll(
             chat_id=query.message.chat_id,
             question=f"Q{idx}: {q['question']} (⏱ {timer}s)",
@@ -235,7 +235,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
-        # Countdown by editing poll question text
+        # Countdown loop, update poll question each second
         for remaining in range(timer-1, -1, -1):
             await asyncio.sleep(1)
             try:
@@ -246,7 +246,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     options=q["options"]
                 )
             except:
-                pass  # ignore if Telegram prevents edit
+                pass
 
 # ----------------- MAIN -----------------
 def main():
