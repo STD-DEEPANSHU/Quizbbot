@@ -18,7 +18,7 @@ from config import TELEGRAM_TOKEN, MONGO_URI, DB_NAME
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 quizzes = db["quizzes"]
-users_answers = db["users_answers"]  # To track per user answers
+users_answers = db["users_answers"]  # Track per-user answers
 
 # -------------------- USER STATE --------------------
 user_state = {}
@@ -27,12 +27,10 @@ user_state = {}
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🆕 Create New Quiz", callback_data="create_quiz")],
-        [InlineKeyboardButton("📚 View My Quizzes", callback_data="view_quizzes")],
-        [InlineKeyboardButton("🌍 Language (Default: English)", callback_data="lang_menu")],
-        [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")]
+        [InlineKeyboardButton("📚 View My Quizzes", callback_data="view_quizzes")]
     ]
     await update.message.reply_text(
-        "This bot will help you create a quiz with multiple choice questions.",
+        "This bot will help you create and play quizzes with multiple choice questions.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -66,16 +64,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Choose how you want to shuffle this quiz:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
-    elif query.data == "leaderboard":
-        leaderboard_text = "🏆 Leaderboard\n\n"
-        all_users = users_answers.distinct("user_id")
-        for u_id in all_users:
-            user_docs = list(users_answers.find({"user_id": u_id}))
-            total_questions = sum([len(doc['answers']) for doc in user_docs])
-            total_correct = sum([sum(1 for ans in doc['answers'] if ans['is_correct']) for doc in user_docs])
-            leaderboard_text += f"User {u_id}: {total_correct}/{total_questions}\n"
-        await query.message.reply_text(leaderboard_text)
 
 # -------------------- MESSAGE HANDLER --------------------
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,17 +267,34 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
-        user_quiz_answers.append({"question_index": idx, "correct_option": correct_index})
+        # Track correct answers
+        user_quiz_answers.append({"question_index": idx, "is_correct": True if correct_index is not None else False})
         await asyncio.sleep(timer)
 
-    # Save user answers
+    # Save user answers in DB
     users_answers.insert_one({
         "user_id": user_id,
         "quiz_id": str(quiz['_id']),
-        "answers": [{"question_index": a["question_index"], "is_correct": True} for a in user_quiz_answers]
+        "answers": user_quiz_answers
     })
 
-    await query.message.reply_text(f"✅ Quiz Finished! You can check the leaderboard by /start -> Leaderboard")
+    # -------------------- LEADERBOARD CALCULATION --------------------
+    all_users = users_answers.distinct("user_id")
+    leaderboard = []
+    for u_id in all_users:
+        docs = list(users_answers.find({"user_id": u_id}))
+        total_questions = sum([len(d['answers']) for d in docs])
+        total_correct = sum([sum(1 for a in d['answers'] if a['is_correct']) for d in docs])
+        leaderboard.append((u_id, total_correct, total_questions))
+
+    leaderboard.sort(key=lambda x: x[1], reverse=True)
+    top10 = leaderboard[:10]
+
+    leaderboard_text = "🏆 Top 10 Leaderboard\n\n"
+    for idx, (u_id, correct, total) in enumerate(top10, start=1):
+        leaderboard_text += f"{idx}. User {u_id}: {correct}/{total}\n"
+
+    await query.message.reply_text(f"✅ Quiz Finished!\n\n{leaderboard_text}")
 
     if user_id in user_state:
         del user_state[user_id]
