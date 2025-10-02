@@ -1,0 +1,25 @@
+{
+  "name": "Telegram Quiz Bot",
+  "description": "A Telegram bot to create and manage quizzes with MongoDB storage.",
+  "repository": "https://github.com/yourusername/quiz-bot",
+  "keywords": ["telegram", "bot", "quiz", "mongodb", "python"],
+  "env": {
+    "TELEGRAM_TOKEN": {
+      "description": "Your Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "MONGO_URI": {
+      "description": "Your MongoDB connection string",
+      "required": true
+    },
+    "DB_NAME": {
+      "description": "MongoDB Database name",
+      "value": "quiz_bot"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}
