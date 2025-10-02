@@ -167,8 +167,47 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await query.message.reply_text("⏱ Select time per question:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def send_quiz_results(context: ContextTypes.DEFAULT_TYPE):
+    """Calculates and sends the final quiz results after the quiz time is over."""
+    job = context.job
+    user_id = job.user_id
+    quiz_title = job.data["quiz_title"]
+    total_questions = job.data["total_questions"]
+    start_time = job.data["start_time"]
+    session_poll_ids = job.data["session_poll_ids"]
+    user_lock = user_locks[user_id]
+
+    logger.info(f"Job triggered to send results for user {user_id}")
+
+    async with user_lock:
+        final_user_data = context.application.user_data.get(user_id, {})
+        correct_count = final_user_data.get("correct_count", 0)
+        wrong_count = final_user_data.get("wrong_count", 0)
+        missed_count = total_questions - (correct_count + wrong_count)
+        duration = int(time.time() - start_time)
+
+        leaderboard_text = (
+            f"🏁 The quiz '{quiz_title}' has finished!\n\n"
+            f"You answered {correct_count + wrong_count} out of {total_questions} questions:\n\n"
+            f"✅ Correct – {correct_count}\n❌ Wrong – {wrong_count}\n⌛️ Missed – {missed_count}\n"
+            f"⏱️ {duration} sec\n\n🥇1st place out of 1."
+        )
+        await context.bot.send_message(chat_id=user_id, text=leaderboard_text)
+
+        # Clear user data for the next quiz
+        final_user_data.clear()
+
+    # Clean up poll IDs from bot_data to prevent memory leak
+    if 'poll_to_user' in context.bot_data:
+        for poll_id in session_poll_ids:
+            context.bot_data['poll_to_user'].pop(poll_id, None)
+
+    # Clean up the user lock
+    if user_id in user_locks:
+        del user_locks[user_id]
+
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the entire quiz playing flow."""
+    """Handles the quiz setup and schedules the result message."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -187,16 +226,18 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.message.reply_text(f"▶️ Starting quiz: *{quiz['title']}*", parse_mode='Markdown')
 
     questions = copy.deepcopy(quiz["questions"])
-    if shuffle_option in ["shuffle_all", "shuffle_questions"]: random.shuffle(questions)
+    if shuffle_option in ["shuffle_all", "shuffle_questions"]:
+        random.shuffle(questions)
 
     user_lock = user_locks[user_id]
-    session_poll_ids = [] # <-- CHANGE HERE: Memory leak fix ke liye poll IDs store karenge
+    session_poll_ids = []
 
     async with user_lock:
         user_data['correct_count'], user_data['wrong_count'] = 0, 0
         user_data["session_correct_answers"] = {}
 
-    if 'poll_to_user' not in context.bot_data: context.bot_data['poll_to_user'] = {}
+    if 'poll_to_user' not in context.bot_data:
+        context.bot_data['poll_to_user'] = {}
 
     for idx, q in enumerate(questions, start=1):
         options, correct_index = q["options"][:], q["correct_index"]
@@ -208,47 +249,35 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         async with user_lock:
             user_data["session_correct_answers"][idx] = correct_index
-        
+
         poll_message = await context.bot.send_poll(
             chat_id=query.message.chat_id, question=f"Q{idx}: {q['question']}", options=options,
             type=Poll.QUIZ, correct_option_id=correct_index, open_period=timer, is_anonymous=False
         )
-        session_poll_ids.append(poll_message.poll.id) # <-- CHANGE HERE: Memory leak fix
+        session_poll_ids.append(poll_message.poll.id)
         context.bot_data['poll_to_user'][poll_message.poll.id] = {"user_id": user_id, "question_idx": idx}
         await asyncio.sleep(timer)
 
-    # Final wait to ensure all poll answers from Telegram are received
-    await query.message.reply_text("<i>Calculating results...</i>", parse_mode='HTML')
-    # <-- CHANGE HERE: Wait time badhaya gaya hai taaki score update ho sake
-    await asyncio.sleep(15) 
+    # Schedule the results to be sent after the last poll's timer is up + a buffer
+    delay = timer + 5  # 5 second buffer for Telegram's network latency
 
-    async with user_lock:
-        final_user_data = context.application.user_data.get(user_id, {})
-        total_questions, correct_count, wrong_count = len(questions), final_user_data.get("correct_count", 0), final_user_data.get("wrong_count", 0)
-        missed_count = total_questions - (correct_count + wrong_count)
-        duration = int(time.time() - start_time)
+    job_data = {
+        "quiz_title": quiz['title'],
+        "total_questions": len(questions),
+        "start_time": start_time,
+        "session_poll_ids": session_poll_ids,
+    }
 
-        leaderboard_text = (
-            f"🏁 The quiz '{quiz['title']}' has finished!\n\n"
-            f"You answered {correct_count + wrong_count} out of {total_questions} questions:\n\n"
-            f"✅ Correct – {correct_count}\n❌ Wrong – {wrong_count}\n⌛️ Missed – {missed_count}\n"
-            f"⏱️ {duration} sec\n\n🥇1st place out of 1."
-        )
-        await context.bot.send_message(chat_id=user_id, text=leaderboard_text)
+    context.job_queue.run_once(
+        send_quiz_results,
+        when=delay,
+        user_id=user_id,
+        data=job_data,
+        name=f"quiz_results_{user_id}_{quiz_id}"
+    )
 
-        # Save answers to DB if any were given
-        if (correct_count + wrong_count) > 0:
-             # This part can be expanded to save detailed answers if needed
-             pass
+    await query.message.reply_text("<i>Quiz is running... Results will be shown at the end.</i>", parse_mode='HTML')
 
-        final_user_data.clear()
-
-    # <-- CHANGE HERE: Memory leak fix, bot data se purane poll IDs saaf kar rahe hain
-    if 'poll_to_user' in context.bot_data:
-        for poll_id in session_poll_ids:
-            context.bot_data['poll_to_user'].pop(poll_id, None)
-
-    if user_id in user_locks: del user_locks[user_id]
 
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles a user's vote in a poll and updates the score in real-time."""
@@ -256,7 +285,6 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     poll_map = context.bot_data.get('poll_to_user', {})
 
     if poll_id in poll_map:
-        # We don't pop here anymore to allow for cleanup later, just get the info
         poll_info = poll_map.get(poll_id)
         if not poll_info: return
 
@@ -268,17 +296,20 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             user_data = context.application.user_data.get(user_id)
             if not user_data: return
 
+            # Check if user has answered already. A poll update is sent on vote and retraction.
+            # We only care about the first vote.
             if update.poll_answer.option_ids:
                 selected_option = update.poll_answer.option_ids[0]
-                
+
                 correct_answers = user_data.get("session_correct_answers", {})
                 if selected_option == correct_answers.get(question_idx):
                     user_data['correct_count'] = user_data.get('correct_count', 0) + 1
                 else:
                     user_data['wrong_count'] = user_data.get('wrong_count', 0) + 1
-        
-        # Once answered, we can pop it
-        poll_map.pop(poll_id, None)
+                
+                # Once answered correctly, we can remove it from the map so it's not processed again
+                poll_map.pop(poll_id, None)
+
 
 # --- MAIN FUNCTION ---
 def main():
