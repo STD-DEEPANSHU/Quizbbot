@@ -188,8 +188,8 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     state = user_state.get(user_id, {})
 
-    # Determine if it's new quiz or play existing
-    if "step" in state:  # new quiz creation
+    # Check if new quiz creation
+    if "step" in state:  # new quiz
         shuffle_option = query.data
         quizzes.insert_one({
             "user_id": user_id,
@@ -203,7 +203,7 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:  # existing quiz play
         quiz_id = query.data.split("_")[2]
         shuffle_option = query.data.split("_")[3]
-        # Save in memory for next timer selection
+        # Save shuffle temporarily for timer selection
         user_state[user_id] = {"play_quiz": quiz_id, "shuffle": shuffle_option}
 
         # Ask timer next
@@ -228,18 +228,20 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     parts = query.data.split("_")
     quiz_id = parts[2]
     timer = int(parts[3])
-    state = user_state.get(user_id, {})
-    shuffle_option = state.get("shuffle", "no_shuffle")
 
+    # Load quiz
     quiz = quizzes.find_one({"_id": ObjectId(quiz_id)})
     if not quiz:
         await query.message.reply_text("❌ Quiz not found!")
         return
 
+    # Get shuffle from user_state
+    state = user_state.get(user_id, {})
+    shuffle_option = state.get("shuffle", "no_shuffle")
+
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
     questions = quiz["questions"][:]
-
     if shuffle_option in ["shuffle_all", "shuffle_questions"]:
         random.shuffle(questions)
 
@@ -262,17 +264,17 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
-        await asyncio.sleep(timer)  # smooth countdown
+        await asyncio.sleep(timer)
 
         # Save analytics
         analytics.insert_one({
             "quiz_id": str(quiz['_id']),
-            "user_id": query.from_user.id,
+            "user_id": user_id,
             "question_index": idx,
             "correct_option": correct_index
         })
 
-    # Clear temporary state
+    # Clear state
     if user_id in user_state:
         del user_state[user_id]
 
