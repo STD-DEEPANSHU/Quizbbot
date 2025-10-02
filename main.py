@@ -2,6 +2,7 @@ import asyncio
 import copy
 import random
 import logging
+from collections import defaultdict
 from pymongo import MongoClient
 from bson import ObjectId
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Poll
@@ -23,6 +24,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- NEW: LOCKS FOR ASYNC SAFETY ---
+# Har user ke data ko access karne ke liye ek lock
+user_locks = defaultdict(asyncio.Lock)
+
 # -------------------- MONGO SETUP --------------------
 try:
     client = MongoClient(MONGO_URI)
@@ -36,7 +41,7 @@ except Exception as e:
 
 # -------------------- START --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear() # Clear any previous state on /start
+    context.user_data.clear()
     keyboard = [
         [InlineKeyboardButton("🆕 Create New Quiz", callback_data="create_quiz")],
         [InlineKeyboardButton("📚 View My Quizzes", callback_data="view_quizzes")],
@@ -45,6 +50,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "This bot will help you create and play quizzes with multiple choice questions.",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+# ... (baaki sabhi functions jaise message_handler, button_handler, etc. same rahenge) ...
+# [NOTE: For brevity, I am only showing the changed functions and the main structure. 
+# The other functions from the previous answer are unchanged.]
 
 # -------------------- BUTTON HANDLER --------------------
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,123 +218,120 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-# -------------------- PLAY QUIZ HANDLER (FINAL FIXED VERSION) --------------------
+# -------------------- PLAY QUIZ HANDLER (FINAL, WITH LOCKS) --------------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    user_data = context.user_data 
-    
-    parts = query.data.split("_")
-    quiz_id = parts[2]
-    timer = int(parts[3])
+    user_lock = user_locks[user_id]  # <-- LOCK
 
-    try:
-        quiz = quizzes.find_one({"_id": ObjectId(quiz_id)})
-        if not quiz:
-            await query.message.reply_text("❌ Quiz not found!")
+    async with user_lock:
+        user_data = context.user_data
+        parts = query.data.split("_")
+        quiz_id = parts[2]
+        timer = int(parts[3])
+
+        try:
+            quiz = quizzes.find_one({"_id": ObjectId(quiz_id)})
+            if not quiz:
+                await query.message.reply_text("❌ Quiz not found!")
+                return
+        except Exception as e:
+            logger.error(f"Error finding quiz {quiz_id}: {e}")
+            await query.message.reply_text("❌ Could not start quiz. Please try again later.")
             return
-    except Exception as e:
-        logger.error(f"Error finding quiz {quiz_id}: {e}")
-        await query.message.reply_text("❌ Could not start quiz. Please try again later.")
-        return
 
-    shuffle_option = user_data.get("play_shuffle_option", "no_shuffle")
-    await query.message.reply_text(f"▶️ Starting quiz: *{quiz['title']}*", parse_mode='Markdown')
-    
-    questions = copy.deepcopy(quiz["questions"])
-    if shuffle_option in ["shuffle_all", "shuffle_questions"]:
-        random.shuffle(questions)
-
-    user_data["quiz_answers"] = {}
-    user_data["session_correct_answers"] = {}
-    
-    if 'poll_to_user' not in context.bot_data:
-        context.bot_data['poll_to_user'] = {}
-
-    for idx, q in enumerate(questions, start=1):
-        options = q["options"][:]
-        correct_index = q["correct_index"]
+        shuffle_option = user_data.get("play_shuffle_option", "no_shuffle")
+        await query.message.reply_text(f"▶️ Starting quiz: *{quiz['title']}*", parse_mode='Markdown')
         
-        if shuffle_option in ["shuffle_all", "shuffle_answers"]:
-            paired = list(enumerate(options))
-            random.shuffle(paired)
-            new_indices, new_options = zip(*paired)
-            options = list(new_options)
-            shuffled_correct_index = list(new_indices).index(correct_index)
-        else:
-            shuffled_correct_index = correct_index
+        questions = copy.deepcopy(quiz["questions"])
+        if shuffle_option in ["shuffle_all", "shuffle_questions"]:
+            random.shuffle(questions)
 
-        user_data["session_correct_answers"][idx] = shuffled_correct_index
+        user_data["quiz_answers"] = {}
+        user_data["session_correct_answers"] = {}
         
-        poll_message = await context.bot.send_poll(
-            chat_id=query.message.chat_id,
-            question=f"Q{idx}: {q['question']}",
-            options=options,
-            type=Poll.QUIZ,
-            correct_option_id=int(shuffled_correct_index),
-            open_period=timer,
-            is_anonymous=False,
-        )
+        if 'poll_to_user' not in context.bot_data:
+            context.bot_data['poll_to_user'] = {}
+
+        for idx, q in enumerate(questions, start=1):
+            options = q["options"][:]
+            correct_index = q["correct_index"]
+            
+            if shuffle_option in ["shuffle_all", "shuffle_answers"]:
+                paired = list(enumerate(options))
+                random.shuffle(paired)
+                new_indices, new_options = zip(*paired)
+                options = list(new_options)
+                shuffled_correct_index = list(new_indices).index(correct_index)
+            else:
+                shuffled_correct_index = correct_index
+
+            user_data["session_correct_answers"][idx] = shuffled_correct_index
+            
+            poll_message = await context.bot.send_poll(
+                chat_id=query.message.chat_id,
+                question=f"Q{idx}: {q['question']}",
+                options=options,
+                type=Poll.QUIZ,
+                correct_option_id=int(shuffled_correct_index),
+                open_period=timer,
+                is_anonymous=False,
+            )
+            
+            context.bot_data['poll_to_user'][poll_message.poll.id] = {"user_id": user_id, "question_idx": idx}
+            await asyncio.sleep(timer)
+
+        await asyncio.sleep(2)
+
+        final_user_data = context.application.user_data.get(user_id, {})
+        quiz_answers = final_user_data.get("quiz_answers", {})
+        session_correct_answers = final_user_data.get("session_correct_answers", {})
+        total_questions = len(questions)
         
-        context.bot_data['poll_to_user'][poll_message.poll.id] = {"user_id": user_id, "question_idx": idx}
-        await asyncio.sleep(timer)
+        correct_count = sum(1 for q_idx, sel_ans in quiz_answers.items() if sel_ans == session_correct_answers.get(q_idx))
 
-    # --- NEW ROBUST WAITING LOGIC ---
-    total_questions = len(questions)
-    timeout_seconds = 5
-    wait_interval = 0.5
-    elapsed_time = 0
+        leaderboard_text = f"🏆 Quiz Finished!\n\nYour Score: *{correct_count} / {total_questions}*"
+        await context.bot.send_message(chat_id=user_id, text=leaderboard_text, parse_mode='Markdown')
+        
+        try:
+            if quiz_answers:
+                users_answers.insert_one({
+                    "user_id": user_id,
+                    "quiz_id": str(quiz["_id"]),
+                    "answers": [{"question_index": k, "selected_option": v} for k, v in quiz_answers.items()],
+                })
+        except Exception as e:
+            logger.error(f"Error saving user answers to DB: {e}")
+        
+        final_user_data.clear()
+        
+    # Quiz khatam hone ke baad lock ko dictionary se hata dena
+    if user_id in user_locks:
+        del user_locks[user_id]
 
-    while elapsed_time < timeout_seconds:
-        current_user_data = context.application.user_data.get(user_id, {})
-        num_answers = len(current_user_data.get("quiz_answers", {}))
-        if num_answers == total_questions:
-            break
-        await asyncio.sleep(wait_interval)
-        elapsed_time += wait_interval
-    
-    # --- FINAL SCORE CALCULATION ---
-    final_user_data = context.application.user_data.get(user_id, {})
-    quiz_answers = final_user_data.get("quiz_answers", {})
-    session_correct_answers = final_user_data.get("session_correct_answers", {})
-    
-    correct_count = sum(1 for q_idx, sel_ans in quiz_answers.items() if sel_ans == session_correct_answers.get(q_idx))
-
-    leaderboard_text = f"🏆 Quiz Finished!\n\nYour Score: *{correct_count} / {total_questions}*"
-    await context.bot.send_message(chat_id=user_id, text=leaderboard_text, parse_mode='Markdown')
-    
-    try:
-        if quiz_answers:
-            users_answers.insert_one({
-                "user_id": user_id,
-                "quiz_id": str(quiz["_id"]),
-                "answers": [{"question_index": k, "selected_option": v} for k, v in quiz_answers.items()],
-            })
-    except Exception as e:
-        logger.error(f"Error saving user answers to DB: {e}")
-    
-    final_user_data.clear()
-
-# -------------------- POLL ANSWER HANDLER --------------------
+# -------------------- POLL ANSWER HANDLER (WITH LOCKS) --------------------
 async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     poll_id = update.poll_answer.poll_id
     
     poll_map = context.bot_data.get('poll_to_user', {})
     if poll_id in poll_map:
-        poll_info = poll_map[poll_id]
+        poll_info = poll_map.get(poll_id)
+        if not poll_info: return
+
         user_id = poll_info["user_id"]
         question_idx = poll_info["question_idx"]
-        
-        # Check if user selected an answer
-        if update.poll_answer.option_ids:
-            selected_option = update.poll_answer.option_ids[0]
-            user_data = context.application.user_data[user_id]
-            if "quiz_answers" not in user_data:
-                user_data["quiz_answers"] = {}
-            user_data["quiz_answers"][question_idx] = selected_option
-        
-        # Clean up the entry from bot_data once processed
+        user_lock = user_locks[user_id] # <-- LOCK
+
+        async with user_lock:
+            if update.poll_answer.option_ids:
+                selected_option = update.poll_answer.option_ids[0]
+                user_data = context.application.user_data[user_id]
+                if "quiz_answers" not in user_data:
+                    user_data["quiz_answers"] = {}
+                user_data["quiz_answers"][question_idx] = selected_option
+            
+        # Clean up bot_data mein se
         del context.bot_data['poll_to_user'][poll_id]
 
 # -------------------- MAIN --------------------
@@ -333,7 +339,6 @@ def main():
     persistence = PicklePersistence(filepath="bot_state_data")
     app = Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).build()
 
-    # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(CallbackQueryHandler(button_handler, pattern="^(create_quiz|view_quizzes|play_(?!timer_|shuffle_).*)$"))
@@ -344,7 +349,6 @@ def main():
     app.add_handler(CallbackQueryHandler(play_timer_handler, pattern="^play_timer_.*$"))
     app.add_handler(PollAnswerHandler(poll_answer_handler))
 
-    # Run the bot
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
