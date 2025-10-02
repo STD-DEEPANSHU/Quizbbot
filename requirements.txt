@@ -2,3 +2,4 @@ python-telegram-bot==20.3
 pymongo
 dnspython
 python-dotenv
+aiogram==3.8.0
