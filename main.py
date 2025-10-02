@@ -211,7 +211,11 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_state[user_id] = {
             "play_quiz": quiz_id,
             "shuffle": shuffle_option,
-            "quiz_title": quiz["title"]
+            "quiz_title": quiz["title"],
+            "current_questions": [],
+            "quiz_answers": {},
+            "current_poll_ids": [],
+            "timer": 0
         }
 
         keyboard = [
@@ -243,9 +247,8 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     state = user_state[user_id]
     shuffle_option = state.get("shuffle", "no_shuffle")
-    await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
-
     questions = copy.deepcopy(quiz["questions"])
+
     if shuffle_option in ["shuffle_all", "shuffle_questions"]:
         random.shuffle(questions)
 
@@ -274,22 +277,23 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
-        # Save correct poll_id for PollAnswerHandler
+        # Save poll_id
         poll_id = poll_message.poll.id
         user_state[user_id]["current_poll_ids"].append(poll_id)
 
+        # Wait timer and close poll
         await asyncio.sleep(timer)
         await context.bot.stop_poll(chat_id=query.message.chat_id, message_id=poll_message.message_id)
 
-    # Leaderboard calculation
-    quiz_answers = user_state[user_id].get("quiz_answers", {})
+    # Calculate correct answers
+    quiz_answers = user_state[user_id]["quiz_answers"]
     total_questions = len(questions)
     correct_count = sum(1 for idx_q, q in enumerate(questions, start=1) if quiz_answers.get(idx_q) == q["correct_index"])
 
     leaderboard_text = f"🏆 Quiz Finished!\n\nYour Score: {correct_count}/{total_questions}\n"
     await query.message.reply_text(leaderboard_text)
 
-    # Save answers in DB
+    # Save to DB
     answers_to_save = [{"question_index": k, "selected_option": v} for k, v in quiz_answers.items()]
     users_answers.insert_one({
         "user_id": user_id,
@@ -308,8 +312,6 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     for uid, state in user_state.items():
         if "current_poll_ids" in state and poll_id in state["current_poll_ids"]:
             idx_q = state["current_poll_ids"].index(poll_id) + 1
-            if "quiz_answers" not in state:
-                state["quiz_answers"] = {}
             state["quiz_answers"][idx_q] = selected_option
             break
 
