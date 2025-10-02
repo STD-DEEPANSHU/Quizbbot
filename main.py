@@ -58,7 +58,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append([InlineKeyboardButton(f"▶️ {q['title']}", callback_data=f"play_{q['_id']}")])
         await query.message.reply_text("📚 Your quizzes:", reply_markup=InlineKeyboardMarkup(buttons))
 
-    elif query.data.startswith("play_"):
+    # Only trigger timer selection for initial play click, exclude timer buttons
+    elif query.data.startswith("play_") and not query.data.startswith("play_timer_"):
         quiz_id = query.data.replace("play_", "")
         # Ask timer before playing
         keyboard = [
