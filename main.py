@@ -168,20 +168,17 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text("Send me the next *question*.")
 
     elif query.data == "finish_quiz":
-        state["step"] = "set_timer"
+        state["step"] = "finished"
+        # Show 5 inline buttons after quiz is finished
         keyboard = [
-            [InlineKeyboardButton("10s", callback_data="timer_10"),
-             InlineKeyboardButton("15s", callback_data="timer_15"),
-             InlineKeyboardButton("30s", callback_data="timer_30")],
-            [InlineKeyboardButton("45s", callback_data="timer_45"),
-             InlineKeyboardButton("1min", callback_data="timer_60"),
-             InlineKeyboardButton("2min", callback_data="timer_120")],
-            [InlineKeyboardButton("3min", callback_data="timer_180"),
-             InlineKeyboardButton("4min", callback_data="timer_240"),
-             InlineKeyboardButton("5min", callback_data="timer_300")]
+            [InlineKeyboardButton("⏯ Start Quiz", callback_data=f"start_private_{user_id}")],
+            [InlineKeyboardButton("👥 Start Quiz in Group", callback_data=f"start_group_{user_id}")],
+            [InlineKeyboardButton("✏️ Edit Quiz", callback_data=f"edit_{user_id}")],
+            [InlineKeyboardButton("🗑 Delete Quiz", callback_data=f"delete_{user_id}")],
+            [InlineKeyboardButton("🔗 Share Quiz", callback_data=f"share_{user_id}")]
         ]
         await query.message.reply_text(
-            "⏱ Please select the time limit (delay) for each question:",
+            "✅ Quiz finished! Choose an action:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -208,24 +205,12 @@ async def timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_state[user_id]
         await query.message.reply_text(f"✅ Your quiz has been saved with a {timer_value} sec delay per question!")
 
-# ----------------- PLAY QUIZ TIMER HANDLER (Live Countdown) -----------------
-async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    parts = query.data.split("_")
-    quiz_id = parts[2]
-    timer = int(parts[3])
-
-    quiz = quizzes.find_one({"_id": ObjectId(quiz_id)})
-    if not quiz:
-        await query.message.reply_text("❌ Quiz not found!")
-        return
-
+# ----------------- PLAY QUIZ -----------------
+async def play_quiz_private(query, context, quiz):
+    timer = quiz.get("timer", 30)
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
     for idx, q in enumerate(quiz["questions"], start=1):
-        # Send poll with initial timer
         poll_message = await context.bot.send_poll(
             chat_id=query.message.chat_id,
             question=f"Q{idx}: {q['question']} (⏱️ {timer}s)",
@@ -235,18 +220,29 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
-        # Countdown loop: update poll question each second
-        for remaining in range(timer-1, -1, -1):
-            await asyncio.sleep(1)
-            try:
-                await context.bot.edit_poll(
-                    chat_id=query.message.chat_id,
-                    message_id=poll_message.message_id,
-                    question=f"Q{idx}: {q['question']} (⏱️ {remaining}s)",
-                    options=q["options"]
-                )
-            except:
-                pass  # Telegram may prevent editing sometimes
+# ----------------- START PRIVATE QUIZ HANDLER -----------------
+async def start_private_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = int(query.data.split("_")[-1])
+    quiz = quizzes.find_one({"user_id": user_id}, sort=[("_id", -1)])
+    if not quiz:
+        await query.message.reply_text("❌ No quiz found!")
+        return
+    await play_quiz_private(query, context, quiz)
+
+# ----------------- START GROUP QUIZ HANDLER -----------------
+async def start_group_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = int(query.data.split("_")[-1])
+    quiz = quizzes.find_one({"user_id": user_id}, sort=[("_id", -1)])
+    if not quiz:
+        await query.message.reply_text("❌ No quiz found!")
+        return
+    await query.message.reply_text(
+        f"👥 Share this message in your group to start the quiz:\n/start_quiz_group {quiz['_id']}"
+    )
 
 # ----------------- MAIN -----------------
 def main():
@@ -255,13 +251,15 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("skip", lambda u, c: message_handler(u, c)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    # Correct order and patterns
+
+    # CallbackQuery handlers
     app.add_handler(CallbackQueryHandler(button_handler, pattern="^(create_quiz|view_quizzes|play_(?!timer_).*)$"))
     app.add_handler(CallbackQueryHandler(options_button, pattern="^(add_option|done_options)$"))
     app.add_handler(CallbackQueryHandler(correct_button, pattern="^correct_.*$"))
     app.add_handler(CallbackQueryHandler(more_questions_handler, pattern="^(new_question|finish_quiz)$"))
     app.add_handler(CallbackQueryHandler(timer_handler, pattern="^timer_.*$"))
-    app.add_handler(CallbackQueryHandler(play_timer_handler, pattern="^play_timer_.*$"))
+    app.add_handler(CallbackQueryHandler(start_private_quiz, pattern="^start_private_.*$"))
+    app.add_handler(CallbackQueryHandler(start_group_quiz, pattern="^start_group_.*$"))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
