@@ -214,10 +214,6 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
     parts = query.data.split("_")
-    if len(parts) < 4:
-        await query.message.reply_text("❌ Invalid selection.")
-        return
-
     quiz_id = parts[2]
     timer = int(parts[3])
 
@@ -226,28 +222,31 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text("❌ Quiz not found!")
         return
 
-    await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']} (⏱ {timer}s per question)")
+    await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
     for idx, q in enumerate(quiz["questions"], start=1):
-        # Send poll
-        await context.bot.send_poll(
+        # Send poll with timer in question
+        poll_message = await context.bot.send_poll(
             chat_id=query.message.chat_id,
-            question=f"Q{idx}: {q['question']}",
+            question=f"Q{idx}: {q['question']} (⏱ {timer}s)",
             options=q["options"],
             type=Poll.QUIZ,
             correct_option_id=q["correct_index"],
             is_anonymous=False
         )
 
-        # Countdown message
-        countdown_msg = await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=f"Time left: {timer} sec"
-        )
-
+        # Countdown by editing poll question text
         for remaining in range(timer-1, -1, -1):
             await asyncio.sleep(1)
-            await countdown_msg.edit_text(f"Time left: {remaining} sec")
+            try:
+                await context.bot.edit_poll(
+                    chat_id=query.message.chat_id,
+                    message_id=poll_message.message_id,
+                    question=f"Q{idx}: {q['question']} (⏱ {remaining}s)",
+                    options=q["options"]
+                )
+            except:
+                pass  # ignore if Telegram prevents edit
 
 # ----------------- MAIN -----------------
 def main():
