@@ -37,7 +37,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# ----------------- QUIZ CREATION -----------------
+# ----------------- BUTTON HANDLER -----------------
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -102,6 +102,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
+# ----------------- OPTIONS HANDLER -----------------
 async def options_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -116,6 +117,7 @@ async def options_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton(o, callback_data=f"correct_{i}")] for i, o in enumerate(opts)]
         await query.message.reply_text("Which one is the correct option?", reply_markup=InlineKeyboardMarkup(keyboard))
 
+# ----------------- CORRECT OPTION HANDLER -----------------
 async def correct_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -146,6 +148,7 @@ async def correct_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.message.reply_text("Question added! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
 
+# ----------------- MORE QUESTIONS HANDLER -----------------
 async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -157,16 +160,42 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text("Send me the next *question*.")
 
     elif query.data == "finish_quiz":
+        state["step"] = "set_timer"
+        keyboard = [
+            [InlineKeyboardButton("10s", callback_data="timer_10"),
+             InlineKeyboardButton("15s", callback_data="timer_15"),
+             InlineKeyboardButton("30s", callback_data="timer_30")],
+            [InlineKeyboardButton("1min", callback_data="timer_60"),
+             InlineKeyboardButton("2min", callback_data="timer_120"),
+             InlineKeyboardButton("5min", callback_data="timer_300")]
+        ]
+        await query.message.reply_text(
+            "⏱ Please set a time limit for questions:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+# ----------------- TIMER HANDLER -----------------
+async def timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    state = user_state[user_id]
+
+    if query.data.startswith("timer_"):
+        timer_value = int(query.data.replace("timer_", ""))
+
+        # Save quiz
         quizzes.insert_one({
             "user_id": user_id,
             "title": state["title"],
             "description": state.get("description", ""),
             "questions": state["questions"],
-            "timer": 30,
+            "timer": timer_value,
             "shuffle": "no_shuffle"
         })
+
         del user_state[user_id]
-        await query.message.reply_text("✅ Your quiz has been saved successfully!")
+        await query.message.reply_text(f"✅ Your quiz has been saved with a {timer_value} sec timer!")
 
 # ----------------- PLAY QUIZ -----------------
 async def play_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_id):
@@ -176,18 +205,19 @@ async def play_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_id)
         await query.message.reply_text("❌ Quiz not found!")
         return
 
-    await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
+    timer = quiz.get("timer", 30)
+    await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']} (⏱ {timer}s per question)")
 
-    for q in quiz["questions"]:
+    for idx, q in enumerate(quiz["questions"], start=1):
         await context.bot.send_poll(
             chat_id=query.message.chat_id,
-            question=q["question"],
+            question=f"Q{idx}: {q['question']}",
             options=q["options"],
             type=Poll.QUIZ,
             correct_option_id=q["correct_index"],
             is_anonymous=False
         )
-        await asyncio.sleep(quiz.get("timer", 30))  # default 30s delay
+        await asyncio.sleep(timer)
 
 # ----------------- MAIN -----------------
 def main():
@@ -200,6 +230,7 @@ def main():
     app.add_handler(CallbackQueryHandler(options_button, pattern="^(add_option|done_options)$"))
     app.add_handler(CallbackQueryHandler(correct_button, pattern="^correct_.*$"))
     app.add_handler(CallbackQueryHandler(more_questions_handler, pattern="^(new_question|finish_quiz)$"))
+    app.add_handler(CallbackQueryHandler(timer_handler, pattern="^timer_.*$"))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
