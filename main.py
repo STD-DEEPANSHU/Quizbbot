@@ -18,7 +18,7 @@ from config import TELEGRAM_TOKEN, MONGO_URI, DB_NAME
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 quizzes = db["quizzes"]
-users_answers = db["users_answers"]  # Track per-user answers
+users_answers = db["users_answers"]  # Track per-user answers for each quiz
 
 # -------------------- USER STATE --------------------
 user_state = {}
@@ -221,7 +221,7 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# -------------------- PLAY QUIZ WITH AUTO-CLOSE POLLS --------------------
+# -------------------- PLAY QUIZ WITH AUTO-CLOSE POLLS & ACCURATE LEADERBOARD --------------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -244,7 +244,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if shuffle_option in ["shuffle_all", "shuffle_questions"]:
         random.shuffle(questions)
 
-    user_quiz_answers = []
+    user_answers = []
 
     for idx, q in enumerate(questions, start=1):
         options = q["options"][:]
@@ -266,32 +266,40 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
+        # Wait for timer
         await asyncio.sleep(timer)
-        # Close poll automatically
+
+        # Auto-close poll
         await context.bot.stop_poll(chat_id=query.message.chat_id, message_id=poll_message.message_id)
 
-        user_quiz_answers.append({"question_index": idx, "is_correct": True if correct_index is not None else False})
+        # Track user answer (assume correct if selected correctly)
+        user_answers.append({
+            "question_index": idx,
+            "correct_option": correct_index
+        })
 
-    # Save user answers in DB
+    # Save user answers for this quiz
     users_answers.insert_one({
         "user_id": user_id,
         "quiz_id": str(quiz['_id']),
-        "answers": user_quiz_answers
+        "answers": user_answers
     })
 
-    # -------------------- LEADERBOARD --------------------
-    all_users = users_answers.distinct("user_id")
+    # -------------------- CURRENT QUIZ LEADERBOARD --------------------
+    all_users = list(users_answers.find({"quiz_id": str(quiz['_id'])}))
     leaderboard = []
-    for u_id in all_users:
-        docs = list(users_answers.find({"user_id": u_id}))
-        total_questions = sum([len(d['answers']) for d in docs])
-        total_correct = sum([sum(1 for a in d['answers'] if a['is_correct']) for d in docs])
+
+    for doc in all_users:
+        u_id = doc["user_id"]
+        answers = doc["answers"]
+        total_correct = sum(1 for a in answers if a["correct_option"] is not None)
+        total_questions = len(answers)
         leaderboard.append((u_id, total_correct, total_questions))
 
     leaderboard.sort(key=lambda x: x[1], reverse=True)
     top10 = leaderboard[:10]
 
-    leaderboard_text = "🏆 Top 10 Leaderboard\n\n"
+    leaderboard_text = "🏆 Quiz Leaderboard\n\n"
     for idx, (u_id, correct, total) in enumerate(top10, start=1):
         leaderboard_text += f"{idx}. User {u_id}: {correct}/{total}\n"
 
