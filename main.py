@@ -15,12 +15,14 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+import random
 from config import TELEGRAM_TOKEN, MONGO_URI, DB_NAME
 
 # MongoDB Setup
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 quizzes = db["quizzes"]
+analytics = db["analytics"]  # new collection for analytics
 
 # Temporary in-memory state
 user_state = {}
@@ -55,7 +57,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = [[InlineKeyboardButton(f"▶️ {q['title']}", callback_data=f"play_{q['_id']}")] for q in user_quizzes]
         await query.message.reply_text("📚 Your quizzes:", reply_markup=InlineKeyboardMarkup(buttons))
 
-    # Initial quiz click (exclude timer buttons)
     elif query.data.startswith("play_") and not query.data.startswith("play_timer_"):
         quiz_id = query.data.replace("play_", "")
         keyboard = [
@@ -168,13 +169,12 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text("Send me the next *question*.")
 
     elif query.data == "finish_quiz":
-        # Save quiz immediately WITHOUT asking timer
         quizzes.insert_one({
             "user_id": user_id,
             "title": state["title"],
             "description": state.get("description", ""),
             "questions": state["questions"],
-            "shuffle": "no_shuffle"
+            "shuffle": "shuffle"  # default shuffle enabled
         })
         del user_state[user_id]
         await query.message.reply_text(f"✅ Your quiz has been saved! You can start it anytime from 'View My Quizzes'.")
@@ -195,29 +195,37 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
-    for idx, q in enumerate(quiz["questions"], start=1):
-        # Send poll with initial timer
+    questions = quiz["questions"]
+    if quiz.get("shuffle") == "shuffle":
+        random.shuffle(questions)
+
+    for idx, q in enumerate(questions, start=1):
+        options = q["options"][:]
+        correct_index = q["correct_index"]
+        if quiz.get("shuffle") == "shuffle":
+            combined = list(zip(options, range(len(options))))
+            random.shuffle(combined)
+            options, new_indices = zip(*combined)
+            correct_index = new_indices.index(correct_index)
+
         poll_message = await context.bot.send_poll(
             chat_id=query.message.chat_id,
             question=f"Q{idx}: {q['question']} (⏱️ {timer}s)",
-            options=q["options"],
+            options=list(options),
             type=Poll.QUIZ,
-            correct_option_id=q["correct_index"],
+            correct_option_id=correct_index,
             is_anonymous=False
         )
 
-        # Countdown loop: update poll question each second
-        for remaining in range(timer-1, -1, -1):
-            await asyncio.sleep(1)
-            try:
-                await context.bot.edit_poll(
-                    chat_id=query.message.chat_id,
-                    message_id=poll_message.message_id,
-                    question=f"Q{idx}: {q['question']} (⏱️ {remaining}s)",
-                    options=q["options"]
-                )
-            except:
-                pass
+        await asyncio.sleep(timer)  # smooth countdown without editing poll
+
+        # Save analytics
+        analytics.insert_one({
+            "quiz_id": quiz_id,
+            "user_id": query.from_user.id,
+            "question_index": idx,
+            "correct_option": correct_index
+        })
 
 # ----------------- MAIN -----------------
 def main():
