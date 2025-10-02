@@ -3,7 +3,11 @@ from datetime import datetime
 from pymongo import MongoClient
 from bson import ObjectId
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Poll
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, PollAnswerHandler,
+    filters, ContextTypes
+)
 from config import TELEGRAM_TOKEN, MONGO_URI, DB_NAME
 
 # ----------------- MongoDB Setup -----------------
@@ -15,6 +19,7 @@ results = db["results"]
 # ----------------- In-memory states -----------------
 user_state = {}
 user_current_scores = {}
+poll_map = {}  # poll_id -> question data (for correct answer tracking)
 
 # ----------------- START COMMAND -----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -112,7 +117,7 @@ async def correct_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Preview Poll
         q = state["current_question"]
-        await context.bot.send_poll(
+        poll_msg = await context.bot.send_poll(
             chat_id=query.message.chat_id,
             question=q["question"],
             options=q["options"],
@@ -120,6 +125,9 @@ async def correct_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             correct_option_id=correct_index,
             is_anonymous=False
         )
+
+        # Save poll_id -> question mapping for score calculation
+        poll_map[poll_msg.poll.id] = q
 
         state["step"] = "more_questions"
         keyboard = [
@@ -160,7 +168,6 @@ async def timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("timer_"):
         timer_value = int(query.data.replace("timer_", ""))
-
         quiz_id = quizzes.insert_one({
             "user_id": user_id,
             "title": state["title"],
@@ -172,10 +179,10 @@ async def timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_state[user_id]
 
         await query.message.reply_text(f"✅ Quiz saved! Starting now.")
-        await play_quiz_private(query, context, quiz_id)
+        await play_quiz_private(query, context, quiz_id, timer_value)
 
 # ----------------- PLAY QUIZ -----------------
-async def play_quiz_private(query, context, quiz_id):
+async def play_quiz_private(query, context, quiz_id, timer):
     quiz = quizzes.find_one({"_id": ObjectId(quiz_id)})
     if not quiz:
         await query.message.reply_text("❌ Quiz not found!")
@@ -183,12 +190,11 @@ async def play_quiz_private(query, context, quiz_id):
 
     user_current_scores[query.from_user.id] = 0
     total_questions = len(quiz["questions"])
-    timer = quiz.get("timer", 10)
 
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
     for idx, q in enumerate(quiz["questions"], start=1):
-        await context.bot.send_poll(
+        poll_msg = await context.bot.send_poll(
             chat_id=query.message.chat_id,
             question=f"Q{idx}: {q['question']} (⏱️ {timer}s)",
             options=q["options"],
@@ -196,11 +202,11 @@ async def play_quiz_private(query, context, quiz_id):
             correct_option_id=q["correct_index"],
             is_anonymous=False
         )
+        # Map poll_id -> question
+        poll_map[poll_msg.poll.id] = q
         await asyncio.sleep(timer)
-        # Increment score for demo
-        user_current_scores[query.from_user.id] += 1
 
-    # Save result
+    # Save result after quiz
     results.insert_one({
         "quiz_id": quiz["_id"],
         "user_id": query.from_user.id,
@@ -210,8 +216,21 @@ async def play_quiz_private(query, context, quiz_id):
         "timestamp": datetime.utcnow()
     })
 
-    # Show leaderboard
     await show_leaderboard(query, context, quiz["_id"])
+
+# ----------------- POLL ANSWER HANDLER -----------------
+async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    answer = update.poll_answer
+    user_id = answer.user.id
+    poll_id = answer.poll_id
+    selected_option = answer.option_ids[0]
+
+    question = poll_map.get(poll_id)
+    if not question:
+        return
+
+    if selected_option == question["correct_index"]:
+        user_current_scores[user_id] = user_current_scores.get(user_id, 0) + 1
 
 # ----------------- SHOW LEADERBOARD -----------------
 async def show_leaderboard(query, context, quiz_id):
@@ -234,6 +253,7 @@ def main():
     app.add_handler(CallbackQueryHandler(correct_button, pattern="^correct_.*$"))
     app.add_handler(CallbackQueryHandler(more_questions_handler, pattern="^(new_question|finish_quiz)$"))
     app.add_handler(CallbackQueryHandler(timer_handler, pattern="^timer_.*$"))
+    app.add_handler(PollAnswerHandler(handle_poll_answer))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
