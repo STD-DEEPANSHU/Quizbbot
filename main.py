@@ -22,7 +22,7 @@ from config import TELEGRAM_TOKEN, MONGO_URI, DB_NAME
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 quizzes = db["quizzes"]
-analytics = db["analytics"]  # new collection for analytics
+analytics = db["analytics"]  # collection for analytics
 
 # Temporary in-memory state
 user_state = {}
@@ -169,15 +169,38 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text("Send me the next *question*.")
 
     elif query.data == "finish_quiz":
-        quizzes.insert_one({
-            "user_id": user_id,
-            "title": state["title"],
-            "description": state.get("description", ""),
-            "questions": state["questions"],
-            "shuffle": "shuffle"  # default shuffle enabled
-        })
-        del user_state[user_id]
-        await query.message.reply_text(f"✅ Your quiz has been saved! You can start it anytime from 'View My Quizzes'.")
+        # Ask user for shuffle option
+        keyboard = [
+            [InlineKeyboardButton("🔀 Shuffle All", callback_data="shuffle_all")],
+            [InlineKeyboardButton("❌ No Shuffle", callback_data="no_shuffle")],
+            [InlineKeyboardButton("🔁 Only Answers", callback_data="shuffle_answers")],
+            [InlineKeyboardButton("🔂 Only Questions", callback_data="shuffle_questions")]
+        ]
+        await query.message.reply_text(
+            "Choose how you want to shuffle your quiz:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+# ----------------- SHUFFLE SELECTION HANDLER -----------------
+async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    state = user_state[user_id]
+
+    shuffle_option = query.data  # "shuffle_all", "no_shuffle", "shuffle_answers", "shuffle_questions"
+
+    # Save quiz with selected shuffle option
+    quizzes.insert_one({
+        "user_id": user_id,
+        "title": state["title"],
+        "description": state.get("description", ""),
+        "questions": state["questions"],
+        "shuffle": shuffle_option
+    })
+
+    del user_state[user_id]
+    await query.message.reply_text(f"✅ Your quiz has been saved with option: {shuffle_option.replace('_',' ').title()}")
 
 # ----------------- PLAY QUIZ TIMER HANDLER -----------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -196,13 +219,16 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
     questions = quiz["questions"]
-    if quiz.get("shuffle") == "shuffle":
+    shuffle_option = quiz.get("shuffle", "no_shuffle")
+
+    if shuffle_option in ["shuffle_all", "shuffle_questions"]:
         random.shuffle(questions)
 
     for idx, q in enumerate(questions, start=1):
         options = q["options"][:]
         correct_index = q["correct_index"]
-        if quiz.get("shuffle") == "shuffle":
+
+        if shuffle_option in ["shuffle_all", "shuffle_answers"]:
             combined = list(zip(options, range(len(options))))
             random.shuffle(combined)
             options, new_indices = zip(*combined)
@@ -238,6 +264,7 @@ def main():
     app.add_handler(CallbackQueryHandler(options_button, pattern="^(add_option|done_options)$"))
     app.add_handler(CallbackQueryHandler(correct_button, pattern="^correct_.*$"))
     app.add_handler(CallbackQueryHandler(more_questions_handler, pattern="^(new_question|finish_quiz)$"))
+    app.add_handler(CallbackQueryHandler(shuffle_handler, pattern="^(shuffle_all|no_shuffle|shuffle_answers|shuffle_questions)$"))
     app.add_handler(CallbackQueryHandler(play_timer_handler, pattern="^play_timer_.*$"))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
