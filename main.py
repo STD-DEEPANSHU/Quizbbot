@@ -188,7 +188,6 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     state = user_state.get(user_id, {})
 
-    # Check if new quiz creation
     if "step" in state:  # new quiz
         shuffle_option = query.data
         quizzes.insert_one({
@@ -203,7 +202,6 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:  # existing quiz play
         quiz_id = query.data.split("_")[2]
         shuffle_option = query.data.split("_")[3]
-        # Save shuffle temporarily for timer selection
         user_state[user_id] = {"play_quiz": quiz_id, "shuffle": shuffle_option}
 
         # Ask timer next
@@ -249,18 +247,20 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         options = q["options"][:]
         correct_index = q["correct_index"]
 
+        # Shuffle options if needed
         if shuffle_option in ["shuffle_all", "shuffle_answers"]:
-            combined = list(zip(options, range(len(options))))
+            combined = list(enumerate(options))  # (original_index, option_text)
             random.shuffle(combined)
-            options, new_indices = zip(*combined)
-            correct_index = new_indices.index(correct_index)
+            indices, options = zip(*combined)
+            options = list(options)
+            correct_index = list(indices).index(correct_index)
 
         poll_message = await context.bot.send_poll(
             chat_id=query.message.chat_id,
             question=f"Q{idx}: {q['question']} (⏱️ {timer}s)",
-            options=list(options),
+            options=options,
             type=Poll.QUIZ,
-            correct_option_id=correct_index,
+            correct_option_id=int(correct_index),
             is_anonymous=False
         )
 
@@ -274,7 +274,6 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "correct_option": correct_index
         })
 
-    # Clear state
     if user_id in user_state:
         del user_state[user_id]
 
