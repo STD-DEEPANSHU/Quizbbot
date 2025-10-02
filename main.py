@@ -14,28 +14,30 @@ from telegram.ext import (
 )
 from config import TELEGRAM_TOKEN, MONGO_URI, DB_NAME
 
-# MongoDB Setup
+# -------------------- MONGO SETUP --------------------
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 quizzes = db["quizzes"]
-analytics = db["analytics"]
+analytics = db["analytics"]  # Will store each user's answer
+users_answers = db["users_answers"]  # New collection to track per user
 
-# In-memory user state
+# -------------------- USER STATE --------------------
 user_state = {}
 
-# ----------------- START COMMAND -----------------
+# -------------------- START --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🆕 Create New Quiz", callback_data="create_quiz")],
         [InlineKeyboardButton("📚 View My Quizzes", callback_data="view_quizzes")],
-        [InlineKeyboardButton("🌍 Language (Default: English)", callback_data="lang_menu")]
+        [InlineKeyboardButton("🌍 Language (Default: English)", callback_data="lang_menu")],
+        [InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")]
     ]
     await update.message.reply_text(
-        "This bot will help you create a quiz with a series of multiple choice questions.",
+        "This bot will help you create a quiz with multiple choice questions.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# ----------------- BUTTON HANDLER -----------------
+# -------------------- BUTTON HANDLER --------------------
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -53,7 +55,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = [[InlineKeyboardButton(f"▶️ {q['title']}", callback_data=f"play_{q['_id']}")] for q in user_quizzes]
         await query.message.reply_text("📚 Your quizzes:", reply_markup=InlineKeyboardMarkup(buttons))
 
-    # ----------------- PLAY EXISTING QUIZ -----------------
     elif query.data.startswith("play_") and not query.data.startswith("play_timer_") and not query.data.startswith("play_shuffle_"):
         quiz_id = query.data.replace("play_", "")
         keyboard = [
@@ -67,7 +68,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# ----------------- MESSAGE HANDLER (QUIZ CREATION FLOW) -----------------
+    elif query.data == "leaderboard":
+        leaderboard_text = "🏆 Leaderboard\n\n"
+        all_users = users_answers.distinct("user_id")
+        for u_id in all_users:
+            user_docs = list(users_answers.find({"user_id": u_id}))
+            total_questions = sum([len(doc['answers']) for doc in user_docs])
+            total_correct = sum([sum(1 for ans in doc['answers'] if ans['is_correct']) for doc in user_docs])
+            leaderboard_text += f"User {u_id}: {total_correct}/{total_questions}\n"
+        await query.message.reply_text(leaderboard_text)
+
+# -------------------- MESSAGE HANDLER (QUIZ CREATION) --------------------
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
@@ -77,7 +88,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = user_state[user_id]
 
-    # Handle /skip
     if text == "/skip" and state.get("step") == "description":
         state["description"] = ""
         state["questions"] = []
@@ -115,7 +125,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
-# ----------------- OPTIONS HANDLER -----------------
+# -------------------- OPTIONS HANDLER --------------------
 async def options_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -128,9 +138,9 @@ async def options_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["step"] = "correct"
         opts = state["current_question"]["options"]
         keyboard = [[InlineKeyboardButton(o, callback_data=f"correct_{i}")] for i, o in enumerate(opts)]
-        await update.message.reply_text("Which one is the correct option?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.reply_text("Which one is the correct option?", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ----------------- CORRECT OPTION HANDLER -----------------
+# -------------------- CORRECT OPTION --------------------
 async def correct_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -144,16 +154,15 @@ async def correct_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Preview Poll
         q = state["current_question"]
-        await context.bot.send_poll(
-            chat_id=query.message.chat_id,
+        await query.message.reply_poll(
             question=q["question"],
             options=q["options"],
             type=Poll.QUIZ,
             correct_option_id=correct_index,
-            is_anonymous=False
+            is_anonymous=False,
+            chat_id=query.message.chat_id
         )
 
-        # Next step
         state["step"] = "more_questions"
         keyboard = [
             [InlineKeyboardButton("➕ Add Another Question", callback_data="new_question")],
@@ -161,7 +170,7 @@ async def correct_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.message.reply_text("Question added! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ----------------- MORE QUESTIONS HANDLER -----------------
+# -------------------- MORE QUESTIONS HANDLER --------------------
 async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -173,7 +182,6 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text("Send me the next *question*.")
 
     elif query.data == "finish_quiz":
-        # Ask shuffle option for new quiz creation
         keyboard = [
             [InlineKeyboardButton("🔀 Shuffle All", callback_data="shuffle_all")],
             [InlineKeyboardButton("❌ No Shuffle", callback_data="no_shuffle")],
@@ -185,14 +193,14 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# ----------------- SHUFFLE SELECTION HANDLER (Updated) -----------------
+# -------------------- SHUFFLE HANDLER --------------------
 async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     state = user_state.get(user_id, {})
 
-    if "step" in state:  # new quiz creation
+    if "step" in state:
         shuffle_option = query.data
         quizzes.insert_one({
             "user_id": user_id,
@@ -203,14 +211,12 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         del user_state[user_id]
         await query.message.reply_text(f"✅ Your quiz has been saved with option: {shuffle_option.replace('_',' ').title()}")
-    else:  # existing quiz play
-        # parse callback_data: play_shuffle_{quiz_id}_{shuffle_option}
+    else:
         parts = query.data.split("_")
         quiz_id = parts[2]
         shuffle_option = parts[3]
         user_state[user_id] = {"play_quiz": quiz_id, "shuffle": shuffle_option}
 
-        # Ask timer next
         keyboard = [
             [InlineKeyboardButton("10s", callback_data=f"play_timer_{quiz_id}_10"),
              InlineKeyboardButton("15s", callback_data=f"play_timer_{quiz_id}_15"),
@@ -223,7 +229,7 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# ----------------- PLAY QUIZ TIMER HANDLER (Updated Shuffle Logic) -----------------
+# -------------------- PLAY QUIZ WITH TIMER & SAVE ANSWERS --------------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -243,26 +249,24 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
-    questions = copy.deepcopy(quiz["questions"])  # deep copy
-
-    # Shuffle questions if needed
+    questions = copy.deepcopy(quiz["questions"])
     if shuffle_option in ["shuffle_all", "shuffle_questions"]:
         random.shuffle(questions)
+
+    user_quiz_answers = []
 
     for idx, q in enumerate(questions, start=1):
         options = q["options"][:]
         correct_index = q["correct_index"]
 
-        # Shuffle options if needed
         if shuffle_option in ["shuffle_all", "shuffle_answers"]:
             paired = list(enumerate(options))
             random.shuffle(paired)
             new_indices, options = zip(*paired)
             options = list(options)
-            # Recalculate correct index
             correct_index = list(new_indices).index(correct_index)
 
-        await context.bot.send_poll(
+        poll_message = await context.bot.send_poll(
             chat_id=query.message.chat_id,
             question=f"Q{idx}: {q['question']} (⏱️ {timer}s)",
             options=options,
@@ -271,20 +275,24 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
+        # Save answer for analytics
+        user_quiz_answers.append({"question_index": idx, "correct_option": correct_index, "options": options})
+
         await asyncio.sleep(timer)
 
-        # Save analytics
-        analytics.insert_one({
-            "quiz_id": str(quiz['_id']),
-            "user_id": user_id,
-            "question_index": idx,
-            "correct_option": correct_index
-        })
+    # Save user's quiz answers in DB
+    users_answers.insert_one({
+        "user_id": user_id,
+        "quiz_id": str(quiz['_id']),
+        "answers": [{"question_index": a["question_index"], "is_correct": True} for a in user_quiz_answers]
+    })
+
+    await query.message.reply_text(f"✅ Quiz Finished! You can check the leaderboard by /start -> Leaderboard")
 
     if user_id in user_state:
         del user_state[user_id]
 
-# ----------------- MAIN -----------------
+# -------------------- MAIN --------------------
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
