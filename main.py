@@ -225,24 +225,24 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
     for idx, q in enumerate(quiz["questions"], start=1):
-        # Initial poll with full timer
+        # Send poll with initial timer
         poll_message = await context.bot.send_poll(
             chat_id=query.message.chat_id,
-            question=f"Q{idx}: {q['question']} (⏱ {timer}s)",
+            question=f"Q{idx}: {q['question']} (⏱️ {timer}s)",
             options=q["options"],
             type=Poll.QUIZ,
             correct_option_id=q["correct_index"],
             is_anonymous=False
         )
 
-        # Countdown loop, update poll question each second
+        # Countdown loop: update poll question each second
         for remaining in range(timer-1, -1, -1):
             await asyncio.sleep(1)
             try:
                 await context.bot.edit_poll(
                     chat_id=query.message.chat_id,
                     message_id=poll_message.message_id,
-                    question=f"Q{idx}: {q['question']} (⏱ {remaining}s)",
+                    question=f"Q{idx}: {q['question']} (⏱️ {remaining}s)",
                     options=q["options"]
                 )
             except:
