@@ -22,7 +22,7 @@ from config import TELEGRAM_TOKEN, MONGO_URI, DB_NAME
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 quizzes = db["quizzes"]
-analytics = db["analytics"]  # collection for analytics
+analytics = db["analytics"]
 
 # Temporary in-memory state
 user_state = {}
@@ -57,17 +57,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = [[InlineKeyboardButton(f"▶️ {q['title']}", callback_data=f"play_{q['_id']}")] for q in user_quizzes]
         await query.message.reply_text("📚 Your quizzes:", reply_markup=InlineKeyboardMarkup(buttons))
 
-    elif query.data.startswith("play_") and not query.data.startswith("play_timer_"):
+    # ----------------- PLAY EXISTING QUIZ -----------------
+    elif query.data.startswith("play_") and not query.data.startswith("play_timer_") and not query.data.startswith("play_shuffle_"):
         quiz_id = query.data.replace("play_", "")
         keyboard = [
-            [InlineKeyboardButton("10s", callback_data=f"play_timer_{quiz_id}_10"),
-             InlineKeyboardButton("15s", callback_data=f"play_timer_{quiz_id}_15"),
-             InlineKeyboardButton("30s", callback_data=f"play_timer_{quiz_id}_30")],
-            [InlineKeyboardButton("45s", callback_data=f"play_timer_{quiz_id}_45"),
-             InlineKeyboardButton("1min", callback_data=f"play_timer_{quiz_id}_60")]
+            [InlineKeyboardButton("🔀 Shuffle All", callback_data=f"play_shuffle_{quiz_id}_shuffle_all")],
+            [InlineKeyboardButton("❌ No Shuffle", callback_data=f"play_shuffle_{quiz_id}_no_shuffle")],
+            [InlineKeyboardButton("🔁 Only Answers", callback_data=f"play_shuffle_{quiz_id}_shuffle_answers")],
+            [InlineKeyboardButton("🔂 Only Questions", callback_data=f"play_shuffle_{quiz_id}_shuffle_questions")]
         ]
         await query.message.reply_text(
-            "⏱ Select time per question for this quiz:",
+            "Choose how you want to shuffle this quiz:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -169,7 +169,7 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text("Send me the next *question*.")
 
     elif query.data == "finish_quiz":
-        # Ask user for shuffle option
+        # Ask shuffle option for new quiz creation
         keyboard = [
             [InlineKeyboardButton("🔀 Shuffle All", callback_data="shuffle_all")],
             [InlineKeyboardButton("❌ No Shuffle", callback_data="no_shuffle")],
@@ -186,30 +186,50 @@ async def shuffle_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    state = user_state[user_id]
+    state = user_state.get(user_id, {})
 
-    shuffle_option = query.data  # "shuffle_all", "no_shuffle", "shuffle_answers", "shuffle_questions"
+    # Determine if it's new quiz or play existing
+    if "step" in state:  # new quiz creation
+        shuffle_option = query.data
+        quizzes.insert_one({
+            "user_id": user_id,
+            "title": state["title"],
+            "description": state.get("description", ""),
+            "questions": state["questions"],
+            "shuffle": shuffle_option
+        })
+        del user_state[user_id]
+        await query.message.reply_text(f"✅ Your quiz has been saved with option: {shuffle_option.replace('_',' ').title()}")
+    else:  # existing quiz play
+        quiz_id = query.data.split("_")[2]
+        shuffle_option = query.data.split("_")[3]
+        # Save in memory for next timer selection
+        user_state[user_id] = {"play_quiz": quiz_id, "shuffle": shuffle_option}
 
-    # Save quiz with selected shuffle option
-    quizzes.insert_one({
-        "user_id": user_id,
-        "title": state["title"],
-        "description": state.get("description", ""),
-        "questions": state["questions"],
-        "shuffle": shuffle_option
-    })
-
-    del user_state[user_id]
-    await query.message.reply_text(f"✅ Your quiz has been saved with option: {shuffle_option.replace('_',' ').title()}")
+        # Ask timer next
+        keyboard = [
+            [InlineKeyboardButton("10s", callback_data=f"play_timer_{quiz_id}_10"),
+             InlineKeyboardButton("15s", callback_data=f"play_timer_{quiz_id}_15"),
+             InlineKeyboardButton("30s", callback_data=f"play_timer_{quiz_id}_30")],
+            [InlineKeyboardButton("45s", callback_data=f"play_timer_{quiz_id}_45"),
+             InlineKeyboardButton("1min", callback_data=f"play_timer_{quiz_id}_60")]
+        ]
+        await query.message.reply_text(
+            "⏱ Select time per question for this quiz:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 # ----------------- PLAY QUIZ TIMER HANDLER -----------------
 async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user_id = query.from_user.id
 
     parts = query.data.split("_")
     quiz_id = parts[2]
     timer = int(parts[3])
+    state = user_state.get(user_id, {})
+    shuffle_option = state.get("shuffle", "no_shuffle")
 
     quiz = quizzes.find_one({"_id": ObjectId(quiz_id)})
     if not quiz:
@@ -218,8 +238,7 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.message.reply_text(f"▶️ Starting quiz: {quiz['title']}")
 
-    questions = quiz["questions"]
-    shuffle_option = quiz.get("shuffle", "no_shuffle")
+    questions = quiz["questions"][:]
 
     if shuffle_option in ["shuffle_all", "shuffle_questions"]:
         random.shuffle(questions)
@@ -243,15 +262,19 @@ async def play_timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_anonymous=False
         )
 
-        await asyncio.sleep(timer)  # smooth countdown without editing poll
+        await asyncio.sleep(timer)  # smooth countdown
 
         # Save analytics
         analytics.insert_one({
-            "quiz_id": quiz_id,
+            "quiz_id": str(quiz['_id']),
             "user_id": query.from_user.id,
             "question_index": idx,
             "correct_option": correct_index
         })
+
+    # Clear temporary state
+    if user_id in user_state:
+        del user_state[user_id]
 
 # ----------------- MAIN -----------------
 def main():
@@ -260,11 +283,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("skip", lambda u, c: message_handler(u, c)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(create_quiz|view_quizzes|play_(?!timer_).*)$"))
+    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(create_quiz|view_quizzes|play_(?!timer_|shuffle_).*)$"))
     app.add_handler(CallbackQueryHandler(options_button, pattern="^(add_option|done_options)$"))
     app.add_handler(CallbackQueryHandler(correct_button, pattern="^correct_.*$"))
     app.add_handler(CallbackQueryHandler(more_questions_handler, pattern="^(new_question|finish_quiz)$"))
-    app.add_handler(CallbackQueryHandler(shuffle_handler, pattern="^(shuffle_all|no_shuffle|shuffle_answers|shuffle_questions)$"))
+    app.add_handler(CallbackQueryHandler(shuffle_handler, pattern="^(shuffle_all|no_shuffle|shuffle_answers|shuffle_questions|play_shuffle_.*)$"))
     app.add_handler(CallbackQueryHandler(play_timer_handler, pattern="^play_timer_.*$"))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
