@@ -165,12 +165,15 @@ async def more_questions_handler(update: Update, context: ContextTypes.DEFAULT_T
             [InlineKeyboardButton("10s", callback_data="timer_10"),
              InlineKeyboardButton("15s", callback_data="timer_15"),
              InlineKeyboardButton("30s", callback_data="timer_30")],
-            [InlineKeyboardButton("1min", callback_data="timer_60"),
-             InlineKeyboardButton("2min", callback_data="timer_120"),
+            [InlineKeyboardButton("45s", callback_data="timer_45"),
+             InlineKeyboardButton("1min", callback_data="timer_60"),
+             InlineKeyboardButton("2min", callback_data="timer_120")],
+            [InlineKeyboardButton("3min", callback_data="timer_180"),
+             InlineKeyboardButton("4min", callback_data="timer_240"),
              InlineKeyboardButton("5min", callback_data="timer_300")]
         ]
         await query.message.reply_text(
-            "⏱ Please set a time limit for questions:",
+            "⏱ Please select the time limit (delay) for each question:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -195,7 +198,7 @@ async def timer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
 
         del user_state[user_id]
-        await query.message.reply_text(f"✅ Your quiz has been saved with a {timer_value} sec timer!")
+        await query.message.reply_text(f"✅ Your quiz has been saved with a {timer_value} sec delay per question!")
 
 # ----------------- PLAY QUIZ -----------------
 async def play_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_id):
@@ -211,7 +214,7 @@ async def play_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_id)
     for idx, q in enumerate(quiz["questions"], start=1):
         await context.bot.send_poll(
             chat_id=query.message.chat_id,
-            question=f"Q{idx}: {q['question']}",
+            question=f"Q{idx}: {q['question']} (⏱ {timer}s)",
             options=q["options"],
             type=Poll.QUIZ,
             correct_option_id=q["correct_index"],
