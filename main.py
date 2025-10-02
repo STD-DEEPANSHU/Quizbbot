@@ -16,7 +16,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, CallbackQuery, Poll, PollAnswer
 from dotenv import load_dotenv
-# Naya import yahan add kiya gaya hai
 from aiogram.client.default import DefaultBotProperties
 
 # --- SETUP ---
@@ -31,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 # --- Aiogram Setup ---
 storage = MemoryStorage()
-# Bot ko initialize karne ki line update kar di gayi hai
 bot = Bot(token=TELEGRAM_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
 dp = Dispatcher(storage=storage)
 router = Router()
@@ -228,10 +226,11 @@ async def finish_quiz_handler(query: CallbackQuery, state: FSMContext):
     await query.answer()
 
 # -------------------- QUIZ PLAY FLOW --------------------
-@router.callback_query(F.data.startswith("play_"))
+
+# YEH FUNCTION UPDATE KIYA GAYA HAI
+@router.callback_query(F.data.regexp(r"^play_(?!shuffle_|timer_).+$"))
 async def play_quiz_start(query: CallbackQuery, state: FSMContext):
-    if query.data.startswith("play_shuffle_") or query.data.startswith("play_timer_"):
-        return # These are handled by other handlers
+    # Ab 'if' condition ki zaroorat nahi hai, kyunki filter hi sahi data laayega.
     
     quiz_id = query.data.replace("play_", "")
     await state.update_data(quiz_id=quiz_id)
